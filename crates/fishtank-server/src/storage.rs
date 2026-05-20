@@ -105,16 +105,25 @@ impl Storage for FileStorage {
 #[derive(Clone)]
 pub struct PgStorage {
     pool: PgPool,
-    world_id: String,
+    storage_key: String,
+    legacy_keys: Vec<String>,
 }
 
 impl PgStorage {
-    pub async fn connect(database_url: &str, world_id: String) -> Result<Self> {
+    pub async fn connect(
+        database_url: &str,
+        storage_key: String,
+        legacy_keys: Vec<String>,
+    ) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(database_url)
             .await?;
-        let storage = Self { pool, world_id };
+        let storage = Self {
+            pool,
+            storage_key,
+            legacy_keys,
+        };
         storage.ensure_schema().await?;
         Ok(storage)
     }
@@ -163,20 +172,65 @@ impl PgStorage {
 #[async_trait]
 impl Storage for PgStorage {
     async fn load(&self) -> Result<Option<StoredState>> {
-        let row = sqlx::query_as::<_, (serde_json::Value, serde_json::Value, serde_json::Value)>(
-            "select snapshot, events, commands from fishtank_world_state where world_id = $1",
+        let mut keys = vec![self.storage_key.clone()];
+        for key in &self.legacy_keys {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.clone());
+            }
+        }
+
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                serde_json::Value,
+                serde_json::Value,
+                serde_json::Value,
+                String,
+            ),
+        >(
+            r#"
+            select world_id, snapshot, events, commands, updated_at::text
+            from fishtank_world_state
+            where world_id = any($1)
+            "#,
         )
-        .bind(&self.world_id)
-        .fetch_optional(&self.pool)
+        .bind(&keys)
+        .fetch_all(&self.pool)
         .await?;
-        row.map(|(snapshot, events, commands)| {
+
+        let mut best: Option<(String, StoredState, String)> = None;
+        for (key, snapshot, events, commands, updated_at) in rows {
             let _commands: Vec<CommandEnvelope> = serde_json::from_value(commands)?;
-            Ok(StoredState {
+            let stored = StoredState {
                 snapshot: serde_json::from_value(snapshot)?,
                 events: serde_json::from_value(events)?,
-            })
-        })
-        .transpose()
+            };
+            let should_replace = best
+                .as_ref()
+                .is_none_or(|(_, current, current_updated_at)| {
+                    stored.snapshot.characters.len() > current.snapshot.characters.len()
+                        || (stored.snapshot.characters.len() == current.snapshot.characters.len()
+                            && updated_at > *current_updated_at)
+                });
+            if should_replace {
+                best = Some((key, stored, updated_at));
+            }
+        }
+
+        if let Some((key, stored, _)) = best {
+            if key != self.storage_key {
+                self.save(
+                    &stored.snapshot,
+                    &stored.events,
+                    &stored.snapshot.command_log,
+                )
+                .await?;
+            }
+            Ok(Some(stored))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn save(
@@ -196,7 +250,7 @@ impl Storage for PgStorage {
                 updated_at = now()
             "#,
         )
-        .bind(&self.world_id)
+        .bind(&self.storage_key)
         .bind(serde_json::to_value(snapshot)?)
         .bind(serde_json::to_value(events)?)
         .bind(serde_json::to_value(commands)?)

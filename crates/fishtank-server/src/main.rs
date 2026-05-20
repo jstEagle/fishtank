@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     convert::Infallible,
+    env,
     net::SocketAddr,
     path::PathBuf,
     str::FromStr,
@@ -155,8 +156,22 @@ async fn serve(
     admin_token: Option<String>,
 ) -> Result<()> {
     let storage: Arc<dyn Storage> = if let Some(database_url) = database_url {
-        Arc::new(PgStorage::connect(&database_url, SINGLETON_STORAGE_KEY.to_string()).await?)
+        let legacy_keys = postgres_legacy_storage_keys();
+        info!(
+            storage_key = SINGLETON_STORAGE_KEY,
+            ?legacy_keys,
+            "using postgres storage"
+        );
+        Arc::new(
+            PgStorage::connect(
+                &database_url,
+                SINGLETON_STORAGE_KEY.to_string(),
+                legacy_keys,
+            )
+            .await?,
+        )
     } else {
+        info!(state_dir = %state_dir.display(), "using file storage");
         Arc::new(FileStorage::new(state_dir))
     };
 
@@ -211,6 +226,19 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn postgres_legacy_storage_keys() -> Vec<String> {
+    let mut keys = vec!["village".to_string()];
+    if let Ok(world_id) = env::var("FISHTANK_WORLD_ID") {
+        let trimmed = world_id.trim();
+        if !trimmed.is_empty() && trimmed != SINGLETON_STORAGE_KEY {
+            keys.push(trimmed.to_string());
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 async fn run_simulation_clock(state: AppState) {
