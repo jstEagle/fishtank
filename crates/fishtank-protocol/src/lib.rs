@@ -6,6 +6,7 @@ pub const SCHEMA_VERSION: &str = "fishtank.v1";
 pub const TICKS_PER_REAL_SECOND: Tick = 5;
 pub const TICKS_PER_INGAME_DAY: Tick = 6 * 60 * 60 * TICKS_PER_REAL_SECOND;
 pub const OFFLINE_RETURN_HOME_TICKS: Tick = TICKS_PER_INGAME_DAY;
+pub const MAX_ACTIONS_PER_WAKE: usize = 3;
 
 pub type CharacterId = String;
 pub type CommandId = String;
@@ -159,6 +160,8 @@ pub struct Activity {
     pub promise_id: Option<PromiseId>,
     #[serde(default)]
     pub reserved_coins: u32,
+    #[serde(default)]
+    pub queued: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -420,6 +423,72 @@ pub struct Observation {
     pub recent_events: Vec<Event>,
     pub notifications: Vec<Notification>,
     pub world_time: WorldTime,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentObservation {
+    pub schema_version: String,
+    pub wake_reason: String,
+    pub actor: AgentActorView,
+    pub world_time: WorldTime,
+    pub location: LocationView,
+    pub nearby_agents: Vec<NearbyAgentView>,
+    pub recent_relevant_events: Vec<Event>,
+    pub notifications: Vec<Notification>,
+    pub open_promises: Vec<AgentPromiseView>,
+    pub available_affordances: Vec<ActionView>,
+    pub memory_hints: AgentMemoryHints,
+    pub limits: AgentWakeLimits,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentActorView {
+    pub id: CharacterId,
+    pub name: String,
+    pub status: CharacterStatus,
+    pub current_activity: Option<Activity>,
+    pub location_id: LocationId,
+    pub home_id: LocationId,
+    pub coins: u32,
+    pub reserved_coins: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct NearbyAgentView {
+    pub id: CharacterId,
+    pub name: String,
+    pub body_color: String,
+    pub face_color: String,
+    pub status: CharacterStatus,
+    pub current_activity: Option<Activity>,
+    pub location_id: LocationId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentPromiseView {
+    pub id: PromiseId,
+    pub activity_id: String,
+    pub trigger: String,
+    pub estimated_ready_at_tick: Tick,
+    pub resume_hint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentMemoryHints {
+    pub stable_ids: Vec<String>,
+    pub recent_interactions: Vec<AgentInteractionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentInteractionSummary {
+    pub with: CharacterId,
+    pub summary: String,
+    pub last_seen_tick: Tick,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentWakeLimits {
+    pub max_actions_this_wake: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

@@ -113,6 +113,7 @@ export interface Activity {
   description: string;
   promise_id: string | null;
   reserved_coins: number;
+  queued: boolean;
 }
 
 export interface QueuedCommand {
@@ -278,7 +279,7 @@ export type EventKind =
   | { event: "command_rejected"; character_id: string; code: string };
 
 export type LiveMessage =
-  | { kind: "snapshot"; world_id: string; snapshot: WorldSnapshot }
-  | { kind: "events"; world_id: string; events: EventRecord[] }
+  | { kind: "snapshot"; snapshot: WorldSnapshot }
+  | { kind: "events"; events: EventRecord[] }
   | { kind: "connection_error"; message: string }
   | { kind: "pong"; at: number };

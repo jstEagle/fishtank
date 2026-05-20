@@ -2,7 +2,6 @@ export interface Env {
   WORLD_ROOM: DurableObjectNamespace;
   FISHTANK_CORE_URL: string;
   FISHTANK_GATEWAY_SECRET: string;
-  FISHTANK_WORLD_ID: string;
 }
 
 type EventRecord = { id: number; tick: number; [key: string]: unknown };
@@ -22,9 +21,8 @@ export default {
     }
 
     const url = new URL(request.url);
-    const worldId = url.pathname.match(/^\/worlds\/([^/]+)\/live$/)?.[1];
-    if (worldId) {
-      const room = env.WORLD_ROOM.get(env.WORLD_ROOM.idFromName(worldId));
+    if (url.pathname === "/live" || /^\/worlds\/[^/]+\/live$/.test(url.pathname)) {
+      const room = env.WORLD_ROOM.get(env.WORLD_ROOM.idFromName("singleton"));
       return room.fetch(request);
     }
 
@@ -32,7 +30,7 @@ export default {
       return proxyApi(request, env);
     }
 
-    return json({ ok: true, service: "fishtank-edge", world_id: env.FISHTANK_WORLD_ID });
+    return json({ ok: true, service: "fishtank-edge", world_model: "single_shared_world" });
   }
 };
 
@@ -78,11 +76,11 @@ export class WorldRoom {
 
   private async sendSnapshot(ws: WebSocket) {
     const snapshot = await this.fetchSnapshot();
-    ws.send(JSON.stringify({ kind: "snapshot", world_id: this.env.FISHTANK_WORLD_ID, snapshot }));
+    ws.send(JSON.stringify({ kind: "snapshot", snapshot }));
   }
 
   private async fetchSnapshot() {
-    const response = await coreFetch(this.env, `/v1/worlds/${this.env.FISHTANK_WORLD_ID}/snapshot`);
+    const response = await coreFetch(this.env, "/v1/snapshot");
     if (!response.ok) {
       throw new Error(`snapshot fetch failed: ${response.status}`);
     }
@@ -98,7 +96,7 @@ export class WorldRoom {
       try {
         const snapshot = await this.fetchSnapshot();
         this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
-        this.broadcast({ kind: "snapshot", world_id: this.env.FISHTANK_WORLD_ID, snapshot });
+        this.broadcast({ kind: "snapshot", snapshot });
       } catch (error) {
         this.broadcast({ kind: "connection_error", message: String(error) });
       } finally {
@@ -122,17 +120,17 @@ export class WorldRoom {
       while (!controller.signal.aborted && this.ctx.getWebSockets().length > 0) {
         const response = await coreFetch(
           this.env,
-          `/v1/worlds/${this.env.FISHTANK_WORLD_ID}/stream?after=${this.lastEventId}`,
+          `/v1/stream?after=${this.lastEventId}`,
           { signal: controller.signal }
         );
         await parseSse(response, (event, data, id) => {
           if (id) this.lastEventId = Number(id);
           if (event === "snapshot") {
-            this.broadcast({ kind: "snapshot", world_id: this.env.FISHTANK_WORLD_ID, snapshot: JSON.parse(data) });
+            this.broadcast({ kind: "snapshot", snapshot: JSON.parse(data) });
           } else if (event === "event") {
             const record = JSON.parse(data) as EventRecord;
             this.lastEventId = Math.max(this.lastEventId, record.id);
-            this.broadcast({ kind: "events", world_id: this.env.FISHTANK_WORLD_ID, events: [record] });
+            this.broadcast({ kind: "events", events: [record] });
             void this.broadcastSnapshot();
           }
         });

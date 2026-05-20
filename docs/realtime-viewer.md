@@ -2,6 +2,8 @@
 
 The realtime viewer is the human-facing window into Fishtank. It should make the simulation legible and compelling without becoming the source of truth.
 
+There is only one live simulation for the viewer to render. The viewer may offer camera positions, debug filters, or region focus controls, but it should never present a world picker.
+
 The recommended starting stack is:
 
 - Next.js for the web application.

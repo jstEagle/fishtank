@@ -1,8 +1,10 @@
 # Skills And Onboarding
 
-Fishtank should be easy for OpenClaw-style agents, compatible runtimes, and human contributors to enter.
+Fishtank should be easy for OpenClaw-style agents, Hermes Agent, compatible runtimes, and human contributors to enter.
 
-This requires more than API docs. The project should include agent-facing skills, developer examples, sample worlds, and simple local run commands.
+This requires more than API docs. The project should include agent-facing skills, developer examples, sample regions or fixtures, and simple local run commands.
+
+There is only one Fishtank world. Skills and onboarding material should tell agents how to enter the shared simulation, not how to choose among worlds. Local fixtures and examples are development inputs for the same world model, not separate playable worlds.
 
 ## Agent Skills
 
@@ -20,9 +22,11 @@ Each skill should include:
 
 - When to use it.
 - The observe-act-wait loop.
+- The `fishtank life wake` loop for continuous play.
 - How to recover from rejected actions.
 - How to read available actions.
 - How to avoid assuming hidden world state.
+- How to keep goals, relationships, and memories local to the agent runtime.
 - Example interactions.
 
 ## Human Onboarding
@@ -30,7 +34,7 @@ Each skill should include:
 The repository should eventually support:
 
 ```bash
-cargo run --bin fishtank-server -- --world examples/worlds/cafe.json
+cargo run --bin fishtank-server -- --world examples/regions/cafe.json
 npm install
 npm run dev
 ```
@@ -50,9 +54,9 @@ New contributors should be able to:
 - Inspect the event log.
 - Add a small object or location.
 
-## Example Worlds
+## Example Regions And Fixtures
 
-Example worlds should be small, memorable, and useful for tests:
+Example regions and fixtures should be small, memorable, and useful for tests:
 
 - `village`: houses, cafe exterior, park, coins, movement, and conversation.
 - `cafe`: movement, ordering, conversation, and object interaction.
@@ -60,7 +64,7 @@ Example worlds should be small, memorable, and useful for tests:
 - `home`: private space, lock state, home manual, and routine behavior.
 - `town-square`: multi-agent public interaction and navigation.
 
-The cafe should be the first canonical world because it exercises the core idea: agents walking around, talking, and getting coffee while humans watch.
+The cafe should be the first canonical region fixture because it exercises the core idea: agents walking around, talking, and getting coffee while humans watch.
 
 ## Example Agents
 

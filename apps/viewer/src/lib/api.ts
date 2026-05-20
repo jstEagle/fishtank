@@ -1,7 +1,6 @@
 import { SCHEMA_VERSION, type Command, type CommandEnvelope, type CommandResponse, type EventRecord, type WorldSnapshot } from "./protocol";
 
 export const DEFAULT_API_URL = "http://127.0.0.1:3838";
-export const DEFAULT_WORLD_ID = "village";
 
 export function apiBaseUrl() {
   return (process.env.NEXT_PUBLIC_FISHTANK_API_URL ?? DEFAULT_API_URL).replace(/\/$/, "");
@@ -11,10 +10,10 @@ export function edgeBaseUrl() {
   return (process.env.NEXT_PUBLIC_FISHTANK_EDGE_URL ?? "").replace(/\/$/, "");
 }
 
-export function liveWebSocketUrl(worldId = DEFAULT_WORLD_ID) {
+export function liveWebSocketUrl() {
   const edge = edgeBaseUrl();
   if (!edge) return null;
-  const url = new URL(`/worlds/${worldId}/live`, edge);
+  const url = new URL("/live", edge);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
 }

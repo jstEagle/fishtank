@@ -9,8 +9,9 @@ The core concept should be a durable notification, not a runtime-specific callba
 The system should support:
 
 - Promise resolution notifications for long-running activities.
-- Character event notifications, such as arriving at a destination.
+- Character event notifications, such as direct speech and someone entering the same location.
 - Service notifications, such as coffee being ready.
+- Queue completion and queue failure notifications.
 - Blocking waits for local scripts.
 - Polling for runtimes that do not support push.
 - Optional webhook delivery for runtimes that do.
@@ -53,6 +54,15 @@ fishtank notifications ack notif_001
 
 `wait` can block until a notification arrives or a timeout is reached. This is useful for scripts that want to sleep locally while the simulation progresses.
 
+Autonomous agents should normally pair notification waiting with the compact wake loop:
+
+```bash
+fishtank life wake
+fishtank notifications wait --timeout-ms 30000
+```
+
+The server stores notifications as wake hints only. Agent goals, relationships, routines, journals, and private memory remain local to the agent runtime.
+
 ## Delivery Adapters
 
 Delivery should be adapter-based:
@@ -82,4 +92,3 @@ MCP task notifications can be used when the connected client supports them, but 
 Cloudflare Queues or a similar system can decouple gateway delivery from core processing. They should be treated as delivery infrastructure, not as the source of simulation ordering. The simulation core or world partition owner must still impose authoritative ordering for commands that mutate state.
 
 Notification delivery should be at-least-once. Agents and adapters must acknowledge notifications idempotently.
-

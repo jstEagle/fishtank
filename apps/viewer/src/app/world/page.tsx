@@ -8,10 +8,10 @@ import {
   type PickedInfo
 } from "@/components/PlayCanvasViewer";
 import { useFishtank } from "@/lib/use-fishtank";
-import type { Character, EventRecord, WorldSnapshot } from "@/lib/protocol";
+import type { Character, EventKind, EventRecord, WorldSnapshot } from "@/lib/protocol";
 
 export default function Home() {
-  const { apiUrl, liveUrl, realtime, connected, loading, error, snapshot, events, refresh } = useFishtank();
+  const { apiUrl, realtime, connected, loading, error, snapshot, events, refresh } = useFishtank();
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
@@ -102,13 +102,9 @@ export default function Home() {
 
         {drawerOpen ? (
           realtime ? (
-            <ObserverPanel
-              apiUrl={apiUrl}
-              liveUrl={liveUrl}
+            <LiveFeedCard
               snapshot={snapshot}
               events={events}
-              selected={selectedCharacter}
-              onRefresh={refresh}
               onClose={() => setDrawerOpen(false)}
             />
           ) : (
@@ -182,76 +178,181 @@ export default function Home() {
   );
 }
 
-function ObserverPanel({
-  apiUrl,
-  liveUrl,
+interface FeedItem {
+  id: string;
+  tick: number;
+  kind: "speech" | "event";
+  speaker?: string;
+  speakerColor?: string;
+  text: string;
+}
+
+function LiveFeedCard({
   snapshot,
   events,
-  selected,
-  onRefresh,
   onClose
 }: {
-  apiUrl: string;
-  liveUrl: string | null;
   snapshot: WorldSnapshot | null;
   events: EventRecord[];
-  selected: Character | null;
-  onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
-  const transcript = Object.values(snapshot?.conversations ?? {})
-    .flatMap((conversation) => conversation.recent_messages)
-    .slice(-8);
+  const items = useMemo(() => buildFeed(events, snapshot), [events, snapshot]);
+
   return (
-    <aside className="dev-drawer observer-panel">
-      <div className="drawer-header">
-        <div>
-          <span className="eyebrow">Observer</span>
-          <h2>Live world</h2>
+    <aside className="live-feed" role="dialog" aria-label="Live feed">
+      <header className="live-feed-head">
+        <div className="live-feed-title">
+          <span className="eyebrow">
+            <span className="dot" />
+            Live feed
+          </span>
+          <span className="live-feed-tick">tick {snapshot?.tick ?? "—"}</span>
         </div>
-        <button type="button" className="icon-button" onClick={onClose} aria-label="Close panel">
+        <button
+          type="button"
+          className="icon-button live-feed-close"
+          onClick={onClose}
+          aria-label="Close live feed"
+        >
           ×
         </button>
-      </div>
-      <div className="drawer-section">
-        <div className="row">
-          <span>edge</span>
-          <strong>{liveUrl ? new URL(liveUrl).host : "local"}</strong>
-        </div>
-        <div className="row">
-          <span>fallback api</span>
-          <strong>{new URL(apiUrl).host}</strong>
-        </div>
-        <div className="row">
-          <span>selected</span>
-          <strong>{selected?.name ?? "none"}</strong>
-        </div>
-        <button type="button" onClick={() => void onRefresh()}>
-          refresh snapshot
-        </button>
-      </div>
-      <div className="drawer-section">
-        <h3>Transcript</h3>
-        {transcript.length ? (
-          transcript.map((message, index) => (
-            <p key={`${message.tick}-${index}`} className="event-line">
-              <strong>{message.speaker_id}</strong> {message.text}
-            </p>
-          ))
+      </header>
+      <div className="live-feed-list">
+        {items.length === 0 ? (
+          <p className="live-feed-empty">Waiting for the world to stir…</p>
         ) : (
-          <p className="muted">No speech yet.</p>
+          items.map((item) => (
+            <div key={item.id} className={`live-feed-item live-feed-item-${item.kind}`}>
+              <span className="live-feed-tick-stamp">t{item.tick}</span>
+              <div className="live-feed-body">
+                {item.speaker ? (
+                  <span className="live-feed-speaker">
+                    <span
+                      className="live-feed-swatch"
+                      style={{ background: item.speakerColor ?? "var(--ink-faint)" }}
+                    />
+                    {item.speaker}
+                  </span>
+                ) : null}
+                <span className="live-feed-text">{item.text}</span>
+              </div>
+            </div>
+          ))
         )}
-      </div>
-      <div className="drawer-section">
-        <h3>Events</h3>
-        {events.slice(-10).map((event) => (
-          <p key={event.id} className="event-line">
-            #{event.id} · tick {event.tick} · {event.kind.event}
-          </p>
-        ))}
       </div>
     </aside>
   );
+}
+
+function buildFeed(events: EventRecord[], snapshot: WorldSnapshot | null): FeedItem[] {
+  const nameFor = (characterId: string | null | undefined) => {
+    if (!characterId) return "Someone";
+    return snapshot?.characters[characterId]?.name ?? characterId;
+  };
+  const colorFor = (characterId: string | null | undefined) =>
+    characterId ? snapshot?.characters[characterId]?.body_color : undefined;
+  const locationFor = (locationId: string | null | undefined) => {
+    if (!locationId) return "somewhere";
+    return (
+      snapshot?.world.locations.find((location) => location.id === locationId)?.name ?? locationId
+    );
+  };
+
+  const feed: FeedItem[] = [];
+  for (const event of events) {
+    const item = describeEvent(event.kind, { nameFor, colorFor, locationFor });
+    if (!item) continue;
+    feed.push({
+      id: `e${event.id}`,
+      tick: event.tick,
+      kind: item.kind,
+      speaker: item.speaker,
+      speakerColor: item.speakerColor,
+      text: item.text
+    });
+  }
+
+  return feed.slice(-30).reverse();
+}
+
+interface DescribeHelpers {
+  nameFor: (characterId: string | null | undefined) => string;
+  colorFor: (characterId: string | null | undefined) => string | undefined;
+  locationFor: (locationId: string | null | undefined) => string;
+}
+
+function describeEvent(
+  kind: EventKind,
+  helpers: DescribeHelpers
+):
+  | {
+      kind: "speech" | "event";
+      speaker?: string;
+      speakerColor?: string;
+      text: string;
+    }
+  | null {
+  switch (kind.event) {
+    case "message_spoken":
+      return {
+        kind: "speech",
+        speaker: helpers.nameFor(kind.speaker_id),
+        speakerColor: helpers.colorFor(kind.speaker_id),
+        text: `“${kind.text}”`
+      };
+    case "character_created":
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: "arrived in the world"
+      };
+    case "character_moved":
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: `moved to ${helpers.locationFor(kind.to)}`
+      };
+    case "activity_started": {
+      const description = kind.description?.trim();
+      if (!description) return null;
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: description
+      };
+    }
+    case "activity_failed":
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: `couldn't finish — ${kind.reason}`
+      };
+    case "coins_spent":
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: `spent ${kind.amount} coin${kind.amount === 1 ? "" : "s"}`
+      };
+    case "character_sent_home":
+      return {
+        kind: "event",
+        speaker: helpers.nameFor(kind.character_id),
+        speakerColor: helpers.colorFor(kind.character_id),
+        text: "headed home"
+      };
+    case "world_expanded":
+      return {
+        kind: "event",
+        text: `The world expanded — new block opened up`
+      };
+    default:
+      return null;
+  }
 }
 
 function CharacterInfoCard({

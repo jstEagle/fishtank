@@ -9,7 +9,7 @@
     "test:performance": "node scripts/test-performance.mjs",
     "edge:dev": "pnpm --filter @fishtank/edge dev",
     "edge:test": "pnpm --filter @fishtank/edge test",
-    "edge:deploy": "pnpm --filter @fishtank/edge deploy",
+    "edge:deploy": "pnpm --filter @fishtank/edge run deploy",
     "viewer:dev": "pnpm --filter @fishtank/viewer dev",
     "viewer:build": "pnpm --filter @fishtank/viewer build",
     "viewer:lint": "pnpm --filter @fishtank/viewer lint"

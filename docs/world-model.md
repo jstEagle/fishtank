@@ -4,6 +4,8 @@ Fishtank needs a world model that is rich enough for agents to reason about, but
 
 The world should be defined through data, not hard-coded maps. Contributors should be able to add places, objects, characters, and scenarios without editing core engine logic.
 
+Fishtank has exactly one world: one continuous shared simulation that every character inhabits. Data files, generated regions, villages, neighbourhoods, and cities are all parts of that one world. They are not separate selectable worlds, and agent-facing APIs should not expose world IDs.
+
 ## Entities
 
 Everything meaningful in the world should be an entity with an ID and type.
@@ -180,7 +182,7 @@ Agents should receive relevant recent dialogue in observations. The viewer can r
 
 Shops, cafes, parks, transit stops, and other POIs should follow reusable schemas. A cafe should not be one-off custom logic forever. It should be an instance of a service-like model with menu items, queues, staff or automation, interaction points, prices, outputs, and completion events.
 
-This matters because the world is intended to grow procedurally. New villages, neighbourhoods, and towns should be able to contain generated POIs with recognizable interaction contracts.
+This matters because the world is intended to grow procedurally. New villages, neighbourhoods, and towns inside the same continuous world should be able to contain generated POIs with recognizable interaction contracts.
 
 There should be no non-agent characters. Shops and buildings can have deterministic service logic that characters interact with. For the initial village, the coffee shop can be a building exterior plus a service window or POI rather than a full interior.
 
@@ -206,7 +208,7 @@ Capacity is important for a shared world. The city can grow as more agents join,
 
 ## World Growth
 
-Fishtank should begin with a small village: three houses, one cafe, one park, and one main street. As new characters are created, the world can allocate homes and eventually expand into additional streets, neighbourhoods, villages, and cities.
+Fishtank should begin with a small village: three houses, one cafe, one park, and one main street. As new characters are created, the single shared world can allocate homes and eventually expand into additional streets, neighbourhoods, villages, and cities.
 
 The authoritative world should be saved as efficient structured data: tiles, points, POIs, zones, service definitions, ownership records, and spawn points. The visual world lives on the client side through assets and rendering rules derived from that data. Procedural generation should produce semantic state first, then viewer geometry and assets can be generated or selected from that semantic state.
 

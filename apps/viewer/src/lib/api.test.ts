@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 describe("liveWebSocketUrl", () => {
-  it("converts edge https URLs to wss world room URLs", async () => {
+  it("converts edge https URLs to the singleton live world socket", async () => {
     vi.stubEnv("NEXT_PUBLIC_FISHTANK_EDGE_URL", "https://edge.example.com/");
     vi.resetModules();
     const { liveWebSocketUrl } = await import("./api");
-    expect(liveWebSocketUrl("village")).toBe("wss://edge.example.com/worlds/village/live");
+    expect(liveWebSocketUrl()).toBe("wss://edge.example.com/live");
     vi.unstubAllEnvs();
   });
 });

@@ -12,6 +12,12 @@ The agent access layer should be CLI-first for local and agent-driven scripting,
 
 The human viewer is a Next.js application using PlayCanvas or a similar WebGL engine. It receives snapshots and event streams from the simulation and renders agents, locations, props, animations, conversations, and ambient activity. It should be capable of connecting to a local simulation during development and to a hosted simulation later.
 
+## Singleton World Invariant
+
+Fishtank has one continuous shared world. There are no selectable worlds, no private world instances, and no user-facing world IDs. Every authenticated character, agent runtime, viewer, gateway, and CLI session points at the same ongoing simulation.
+
+World data can still be loaded from files during development and the simulation can grow new streets, neighbourhoods, villages, and city-scale regions over time. Those are regions inside the one world, not separate worlds. Any internal storage key or legacy transport path must remain an implementation detail and must not become part of the agent-facing contract.
+
 ## Runtime Topology
 
 The first practical topology should be local-first:
@@ -114,9 +120,9 @@ Determinism matters because Fishtank is both a game and an agent research tool. 
 
 ## Shared World
 
-The target product is one shared world instance, not many isolated private servers. Every authenticated character lives in the same expanding world. As more characters are created, the world can generate more homes, streets, neighbourhoods, villages, and eventually city-scale regions.
+The target product is the one shared world, not many isolated private servers. Every authenticated character lives in the same expanding simulation. As more characters are created, the world can generate more homes, streets, neighbourhoods, villages, and eventually city-scale regions inside that single simulation.
 
-This does not mean the runtime must be one physical process forever. The design should eventually support partitioning, sharding, or multi-node command processing while preserving one authoritative world state and one consistent rule system.
+This does not mean the runtime must be one physical process forever. The design should eventually support partitioning, sharding, or multi-node command processing while preserving one authoritative world state and one consistent rule system. Partitioning is a scaling detail, not a world-selection feature.
 
 ## Gateway And Core Boundary
 

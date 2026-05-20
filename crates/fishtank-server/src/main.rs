@@ -14,8 +14,8 @@ use axum::{
 use clap::{Parser, Subcommand};
 use fishtank_core::Engine;
 use fishtank_protocol::{
-    AuthenticatedCharacterRequest, Character, Command, CommandEnvelope, Event, SCHEMA_VERSION,
-    TokenCharacter, WorldDefinition, WorldSnapshot,
+    AuthenticatedCharacterRequest, Character, Command, CommandEnvelope, Event, EventId,
+    SCHEMA_VERSION, TokenCharacter, WorldDefinition, WorldSnapshot,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,8 @@ use storage::{FileStorage, PgStorage, Storage};
 use tokio::fs;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
+
+const SINGLETON_STORAGE_KEY: &str = "singleton";
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -57,8 +59,6 @@ enum Commands {
         gateway_secret: Option<String>,
         #[arg(long, env = "FISHTANK_ADMIN_TOKEN")]
         admin_token: Option<String>,
-        #[arg(long, env = "FISHTANK_WORLD_ID", default_value = "village")]
-        world_id: String,
     },
     Replay {
         #[arg(long, default_value = "worlds/village.json")]
@@ -74,7 +74,7 @@ struct AppState {
     storage: Arc<dyn Storage>,
     gateway_secret: Option<String>,
     admin_token: Option<String>,
-    world_id: String,
+    legacy_world_id: String,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +84,7 @@ struct EventsQuery {
 
 #[derive(Serialize)]
 struct AdminCharacterList {
-    world_id: String,
+    world_model: &'static str,
     tick: u64,
     characters: Vec<Character>,
 }
@@ -115,7 +115,6 @@ async fn main() -> Result<()> {
             database_url,
             gateway_secret,
             admin_token,
-            world_id,
         } => {
             let bind = resolve_bind(bind, port)?;
             serve(
@@ -125,7 +124,6 @@ async fn main() -> Result<()> {
                 database_url,
                 gateway_secret,
                 admin_token,
-                world_id,
             )
             .await
         }
@@ -155,10 +153,9 @@ async fn serve(
     database_url: Option<String>,
     gateway_secret: Option<String>,
     admin_token: Option<String>,
-    world_id: String,
 ) -> Result<()> {
     let storage: Arc<dyn Storage> = if let Some(database_url) = database_url {
-        Arc::new(PgStorage::connect(&database_url, world_id.clone()).await?)
+        Arc::new(PgStorage::connect(&database_url, SINGLETON_STORAGE_KEY.to_string()).await?)
     } else {
         Arc::new(FileStorage::new(state_dir))
     };
@@ -170,12 +167,13 @@ async fn serve(
             .await?;
     }
 
+    let legacy_world_id = engine.state().world_id.clone();
     let app_state = AppState {
         engine: Arc::new(Mutex::new(engine)),
         storage,
         gateway_secret,
         admin_token,
-        world_id,
+        legacy_world_id,
     };
     tokio::spawn(run_simulation_clock(app_state.clone()));
     let app = Router::new()
@@ -183,15 +181,22 @@ async fn serve(
         .route("/snapshot", get(snapshot))
         .route("/events", get(events))
         .route("/characters/{character_id}/observe", get(observe))
+        .route(
+            "/characters/{character_id}/observe-agent",
+            get(observe_agent),
+        )
         .route("/command", post(command))
         .route("/v1/worlds/{world_id}/snapshot", get(v1_snapshot))
         .route("/v1/worlds/{world_id}/events", get(v1_events))
         .route("/v1/worlds/{world_id}/stream", get(v1_stream))
+        .route("/v1/snapshot", get(v1_snapshot_default))
         .route("/v1/character", post(v1_character))
         .route("/v1/observe", get(v1_observe))
+        .route("/v1/observe/agent", get(v1_observe_agent))
         .route("/v1/actions", get(v1_actions))
         .route("/v1/command", post(v1_command))
         .route("/v1/events", get(v1_events_default))
+        .route("/v1/stream", get(v1_stream_default))
         .route("/v1/notifications", get(v1_notifications))
         .route("/admin/characters", get(admin_characters))
         .route(
@@ -304,6 +309,15 @@ async fn observe(
     Ok(observe_character(&state, &character_id).into_response())
 }
 
+async fn observe_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(character_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    authorize_gateway(&state, &headers)?;
+    Ok(observe_agent_character(&state, &character_id).into_response())
+}
+
 async fn command(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -320,6 +334,14 @@ async fn v1_snapshot(
 ) -> Result<Json<WorldSnapshot>, AppError> {
     authorize_gateway(&state, &headers)?;
     ensure_world(&state, &world_id)?;
+    Ok(Json(snapshot_from_state(&state)))
+}
+
+async fn v1_snapshot_default(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WorldSnapshot>, AppError> {
+    authorize_gateway(&state, &headers)?;
     Ok(Json(snapshot_from_state(&state)))
 }
 
@@ -351,7 +373,23 @@ async fn v1_stream(
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
     authorize_gateway(&state, &headers)?;
     ensure_world(&state, &world_id)?;
-    let mut last_event_id = query.after.unwrap_or(0);
+    stream_events(state, query.after)
+}
+
+async fn v1_stream_default(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
+    authorize_gateway(&state, &headers)?;
+    stream_events(state, query.after)
+}
+
+fn stream_events(
+    state: AppState,
+    after: Option<EventId>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
+    let mut last_event_id = after.unwrap_or(0);
     let stream_state = state.clone();
     let stream = async_stream::stream! {
         let initial = serde_json::to_string(&snapshot_from_state(&stream_state))
@@ -425,6 +463,15 @@ async fn v1_observe(
     Ok(observe_character(&state, &character_id).into_response())
 }
 
+async fn v1_observe_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    authorize_gateway(&state, &headers)?;
+    let character_id = character_for_headers(&state, &headers).await?;
+    Ok(observe_agent_character(&state, &character_id).into_response())
+}
+
 async fn v1_actions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -482,7 +529,7 @@ async fn admin_characters(
     authorize_admin(&state, &headers)?;
     let snapshot = snapshot_from_state(&state);
     Ok(Json(AdminCharacterList {
-        world_id: snapshot.world_id,
+        world_model: "single_shared_world",
         tick: snapshot.tick,
         characters: snapshot.characters.into_values().collect(),
     }))
@@ -541,6 +588,18 @@ fn observe_character(state: &AppState, character_id: &str) -> axum::response::Re
         .lock()
         .expect("engine lock poisoned")
         .observe(character_id);
+    match response {
+        Ok(observation) => Json(observation).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(error)).into_response(),
+    }
+}
+
+fn observe_agent_character(state: &AppState, character_id: &str) -> axum::response::Response {
+    let response = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .observe_agent(character_id);
     match response {
         Ok(observation) => Json(observation).into_response(),
         Err(error) => (StatusCode::BAD_REQUEST, Json(error)).into_response(),
@@ -606,7 +665,7 @@ fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError
 }
 
 fn ensure_world(state: &AppState, world_id: &str) -> Result<(), AppError> {
-    if state.world_id == world_id {
+    if state.legacy_world_id == world_id {
         Ok(())
     } else {
         Err(AppError::status(StatusCode::NOT_FOUND, "unknown world"))

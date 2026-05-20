@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { DEFAULT_WORLD_ID, apiBaseUrl, getEvents, getSnapshot, liveWebSocketUrl } from "./api";
+import { apiBaseUrl, getEvents, getSnapshot, liveWebSocketUrl } from "./api";
 import type { EventRecord, LiveMessage, WorldSnapshot } from "./protocol";
 
 export interface ViewerState {
@@ -39,7 +39,7 @@ function appendEvents(current: EventRecord[], nextEvents: EventRecord[]) {
 
 export function useFishtank(): ViewerState {
   const apiUrl = useMemo(() => apiBaseUrl(), []);
-  const liveUrl = useMemo(() => liveWebSocketUrl(DEFAULT_WORLD_ID), []);
+  const liveUrl = useMemo(() => liveWebSocketUrl(), []);
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [lastEventId, setLastEventId] = useState<number | null>(null);

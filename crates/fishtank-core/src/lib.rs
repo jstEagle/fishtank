@@ -1,12 +1,13 @@
 use fishtank_protocol::{
-    ActionView, Activity, ActivityKind, ActivityStatus, ApiError, Character, CharacterId,
-    CharacterStatus, Command, CommandEnvelope, CommandResponse, CommandResult, Conversation,
-    ConversationId, Direction, EntityId, EntityView, Event, EventId, EventKind, FacingDirection,
-    GridPosition, GridSize, GroundType, HomeAction, HomeManual, LocationDefinition, LocationId,
-    LocationView, MoveMode, Notification, NotificationAction, OFFLINE_RETURN_HOME_TICKS,
-    Observation, PreconditionKind, Promise, QueueableCommand, QueuedCommand, SCHEMA_VERSION,
-    ServiceDefinition, SpeechMessage, SpeechTarget, TICKS_PER_INGAME_DAY, Tick, WorldDefinition,
-    WorldSnapshot, WorldTime,
+    ActionView, Activity, ActivityKind, ActivityStatus, AgentActorView, AgentInteractionSummary,
+    AgentMemoryHints, AgentObservation, AgentPromiseView, AgentWakeLimits, ApiError, Character,
+    CharacterId, CharacterStatus, Command, CommandEnvelope, CommandResponse, CommandResult,
+    Conversation, ConversationId, Direction, EntityId, EntityView, Event, EventId, EventKind,
+    FacingDirection, GridPosition, GridSize, GroundType, HomeAction, HomeManual,
+    LocationDefinition, LocationId, LocationView, MAX_ACTIONS_PER_WAKE, MoveMode, NearbyAgentView,
+    Notification, NotificationAction, OFFLINE_RETURN_HOME_TICKS, Observation, PreconditionKind,
+    Promise, QueueableCommand, QueuedCommand, SCHEMA_VERSION, ServiceDefinition, SpeechMessage,
+    SpeechTarget, TICKS_PER_INGAME_DAY, Tick, WorldDefinition, WorldSnapshot, WorldTime,
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -223,6 +224,40 @@ impl Engine {
         })
     }
 
+    pub fn observe_agent(&self, character_id: &str) -> Result<AgentObservation, ApiError> {
+        let observation = self.observe(character_id)?;
+        let actor = observation.actor.clone();
+        let nearby_agents = self.nearby_agent_views(&actor);
+        let recent_relevant_events = self.recent_relevant_events(&actor);
+        let open_promises = self.open_promises(&actor);
+        let memory_hints = self.agent_memory_hints(&actor, &nearby_agents, &recent_relevant_events);
+        Ok(AgentObservation {
+            schema_version: SCHEMA_VERSION.to_string(),
+            wake_reason: self.wake_reason(&observation.notifications),
+            actor: AgentActorView {
+                id: actor.id.clone(),
+                name: actor.name.clone(),
+                status: actor.status.clone(),
+                current_activity: actor.current_activity.clone(),
+                location_id: actor.location_id.clone(),
+                home_id: actor.home_id.clone(),
+                coins: actor.coins,
+                reserved_coins: actor.reserved_coins,
+            },
+            world_time: observation.world_time,
+            location: observation.location,
+            nearby_agents,
+            recent_relevant_events,
+            notifications: observation.notifications,
+            open_promises,
+            available_affordances: observation.available_actions,
+            memory_hints,
+            limits: AgentWakeLimits {
+                max_actions_this_wake: MAX_ACTIONS_PER_WAKE,
+            },
+        })
+    }
+
     fn apply_inner(
         &mut self,
         envelope: CommandEnvelope,
@@ -436,6 +471,7 @@ impl Engine {
                 description: description.clone(),
                 promise_id: None,
                 reserved_coins: 0,
+                queued: false,
             });
             actor.status = CharacterStatus::Moving;
         }
@@ -506,9 +542,28 @@ impl Engine {
         self.record(EventKind::MessageSpoken {
             conversation_id: conversation_id.clone(),
             speaker_id: character_id.to_string(),
-            target,
+            target: target.clone(),
             text,
         });
+        if let SpeechTarget::Character(target_id) = target
+            && self.state.characters.contains_key(&target_id)
+        {
+            let speaker_name = self
+                .state
+                .characters
+                .get(character_id)
+                .map(|character| character.name.clone())
+                .unwrap_or_else(|| character_id.to_string());
+            self.create_notification(
+                &target_id,
+                "directed_speech",
+                &format!("{speaker_name} spoke directly to you."),
+                [
+                    ("speaker_id".to_string(), character_id.to_string()),
+                    ("conversation_id".to_string(), conversation_id.clone()),
+                ],
+            );
+        }
         Ok(CommandResult::MessageSpoken { conversation_id })
     }
 
@@ -571,6 +626,7 @@ impl Engine {
                 description: description.clone(),
                 promise_id: Some(promise_id.clone()),
                 reserved_coins: service.price_coins,
+                queued: false,
             });
             actor.status = CharacterStatus::Ordering;
         }
@@ -776,6 +832,9 @@ impl Engine {
                         "The notification belongs to another character.",
                     ));
                 }
+                if notification.acknowledged {
+                    return Ok(CommandResult::NotificationAcknowledged { notification_id });
+                }
                 notification.acknowledged = true;
                 self.record(EventKind::NotificationAcknowledged {
                     character_id: character_id.to_string(),
@@ -807,8 +866,22 @@ impl Engine {
             else {
                 continue;
             };
+            let was_queued = activity.queued;
             self.complete_activity(&character_id, activity);
+            let had_remaining_queue = self
+                .state
+                .characters
+                .get(&character_id)
+                .is_some_and(|actor| !actor.queued_commands.is_empty());
             self.start_next_queue_step(&character_id);
+            if was_queued && !had_remaining_queue && self.queue_is_idle(&character_id) {
+                self.create_notification(
+                    &character_id,
+                    "queue_completed",
+                    "Your queued routine is complete.",
+                    [("character_id".to_string(), character_id.clone())],
+                );
+            }
         }
     }
 
@@ -833,6 +906,7 @@ impl Engine {
                         from,
                         to: target_id.clone(),
                     });
+                    self.create_arrival_notifications(character_id, target_id);
                 }
             }
             ActivityKind::Ordering => {
@@ -928,15 +1002,46 @@ impl Engine {
             QueueableCommand::Home { action } => self.home_action(character_id, action),
         };
 
-        if let Err(error) = result {
-            self.release_all_reservations(character_id);
-            if let Some(actor) = self.state.characters.get_mut(character_id) {
-                actor.queued_commands.clear();
+        match result {
+            Ok(_) => {
+                if let Some(activity) = self
+                    .state
+                    .characters
+                    .get_mut(character_id)
+                    .and_then(|actor| actor.current_activity.as_mut())
+                {
+                    activity.queued = true;
+                } else if self.queue_is_idle(character_id) {
+                    self.create_notification(
+                        character_id,
+                        "queue_completed",
+                        "Your queued routine is complete.",
+                        [("character_id".to_string(), character_id.to_string())],
+                    );
+                } else {
+                    self.start_next_queue_step(character_id);
+                }
             }
-            self.record(EventKind::QueueStepFailed {
-                character_id: character_id.to_string(),
-                code: error.code,
-            });
+            Err(error) => {
+                let code = error.code;
+                self.release_all_reservations(character_id);
+                if let Some(actor) = self.state.characters.get_mut(character_id) {
+                    actor.queued_commands.clear();
+                }
+                self.record(EventKind::QueueStepFailed {
+                    character_id: character_id.to_string(),
+                    code: code.clone(),
+                });
+                self.create_notification(
+                    character_id,
+                    "queue_failed",
+                    "Your queued routine stopped before it finished.",
+                    [
+                        ("character_id".to_string(), character_id.to_string()),
+                        ("code".to_string(), code),
+                    ],
+                );
+            }
         }
     }
 
@@ -962,6 +1067,7 @@ impl Engine {
             description: description.clone(),
             promise_id: None,
             reserved_coins: 0,
+            queued: false,
         });
         actor.status = CharacterStatus::Waiting;
         self.record(EventKind::ActivityStarted {
@@ -1283,6 +1389,226 @@ impl Engine {
             .collect()
     }
 
+    fn wake_reason(&self, notifications: &[Notification]) -> String {
+        for kind in [
+            "directed_speech",
+            "promise_resolved",
+            "queue_failed",
+            "queue_completed",
+            "same_location_entry",
+        ] {
+            if notifications
+                .iter()
+                .any(|notification| notification.kind == kind)
+            {
+                return match kind {
+                    "promise_resolved" => "promise_ready",
+                    other => other,
+                }
+                .to_string();
+            }
+        }
+        "idle_timeout".to_string()
+    }
+
+    fn nearby_agent_views(&self, actor: &Character) -> Vec<NearbyAgentView> {
+        self.state
+            .characters
+            .values()
+            .filter(|character| {
+                character.id != actor.id && character.location_id == actor.location_id
+            })
+            .map(|character| NearbyAgentView {
+                id: character.id.clone(),
+                name: character.name.clone(),
+                body_color: character.body_color.clone(),
+                face_color: character.face_color.clone(),
+                status: character.status.clone(),
+                current_activity: character.current_activity.clone(),
+                location_id: character.location_id.clone(),
+            })
+            .collect()
+    }
+
+    fn recent_relevant_events(&self, actor: &Character) -> Vec<Event> {
+        self.events
+            .iter()
+            .rev()
+            .filter(|event| self.event_is_relevant_to_actor(event, actor))
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
+    fn event_is_relevant_to_actor(&self, event: &Event, actor: &Character) -> bool {
+        match &event.kind {
+            EventKind::CharacterMoved {
+                character_id,
+                from,
+                to,
+            } => {
+                character_id == &actor.id || from == &actor.location_id || to == &actor.location_id
+            }
+            EventKind::MessageSpoken {
+                speaker_id, target, ..
+            } => {
+                speaker_id == &actor.id
+                    || matches!(target, SpeechTarget::Character(target_id) if target_id == &actor.id)
+                    || self
+                        .state
+                        .characters
+                        .get(speaker_id)
+                        .is_some_and(|speaker| speaker.location_id == actor.location_id)
+            }
+            EventKind::ActivityStarted { character_id, .. }
+            | EventKind::ActivityCompleted { character_id, .. }
+            | EventKind::ActivityFailed { character_id, .. }
+            | EventKind::QueueAccepted { character_id, .. }
+            | EventKind::QueueStepStarted { character_id, .. }
+            | EventKind::QueueStepFailed { character_id, .. }
+            | EventKind::PromiseResolved { character_id, .. } => character_id == &actor.id,
+            EventKind::PromiseCreated { promise } => actor
+                .current_activity
+                .as_ref()
+                .is_some_and(|activity| activity.id == promise.activity_id),
+            _ => false,
+        }
+    }
+
+    fn open_promises(&self, actor: &Character) -> Vec<AgentPromiseView> {
+        actor
+            .current_activity
+            .as_ref()
+            .and_then(|activity| {
+                activity.promise_id.as_ref().map(|promise_id| {
+                    let resume_hint = self
+                        .service(activity.target_id.as_deref().unwrap_or_default())
+                        .map(|service| {
+                            format!("Your {} is ready at {}.", service.item, service.name)
+                        })
+                        .unwrap_or_else(|_| activity.description.clone());
+                    AgentPromiseView {
+                        id: promise_id.clone(),
+                        activity_id: activity.id.clone(),
+                        trigger: "activity_ready".to_string(),
+                        estimated_ready_at_tick: activity.completes_at_tick,
+                        resume_hint,
+                    }
+                })
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn agent_memory_hints(
+        &self,
+        actor: &Character,
+        nearby_agents: &[NearbyAgentView],
+        recent_events: &[Event],
+    ) -> AgentMemoryHints {
+        let mut stable_ids = vec![
+            actor.id.clone(),
+            actor.location_id.clone(),
+            actor.home_id.clone(),
+        ];
+        stable_ids.extend(
+            actor
+                .current_activity
+                .iter()
+                .map(|activity| activity.id.clone()),
+        );
+        stable_ids.extend(nearby_agents.iter().map(|agent| agent.id.clone()));
+        stable_ids.extend(
+            self.location(&actor.location_id)
+                .into_iter()
+                .flat_map(|location| location.exits.iter().cloned()),
+        );
+        stable_ids.sort();
+        stable_ids.dedup();
+
+        let recent_interactions = recent_events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::MessageSpoken {
+                    speaker_id,
+                    target,
+                    text,
+                    ..
+                } if speaker_id == &actor.id => {
+                    let with = match target {
+                        SpeechTarget::Character(target_id) => target_id.clone(),
+                        _ => speaker_id.clone(),
+                    };
+                    Some(AgentInteractionSummary {
+                        with,
+                        summary: format!("You said: {text}"),
+                        last_seen_tick: event.tick,
+                    })
+                }
+                EventKind::MessageSpoken {
+                    speaker_id, text, ..
+                } => Some(AgentInteractionSummary {
+                    with: speaker_id.clone(),
+                    summary: format!("{speaker_id} said: {text}"),
+                    last_seen_tick: event.tick,
+                }),
+                EventKind::CharacterMoved {
+                    character_id, to, ..
+                } if character_id != &actor.id => Some(AgentInteractionSummary {
+                    with: character_id.clone(),
+                    summary: format!("{character_id} arrived at {to}."),
+                    last_seen_tick: event.tick,
+                }),
+                _ => None,
+            })
+            .take(8)
+            .collect();
+
+        AgentMemoryHints {
+            stable_ids,
+            recent_interactions,
+        }
+    }
+
+    fn queue_is_idle(&self, character_id: &str) -> bool {
+        self.state
+            .characters
+            .get(character_id)
+            .is_some_and(|actor| {
+                actor.current_activity.is_none() && actor.queued_commands.is_empty()
+            })
+    }
+
+    fn create_arrival_notifications(&mut self, mover_id: &str, location_id: &str) {
+        let mover_name = self
+            .state
+            .characters
+            .get(mover_id)
+            .map(|character| character.name.clone())
+            .unwrap_or_else(|| mover_id.to_string());
+        let recipients = self
+            .state
+            .characters
+            .values()
+            .filter(|character| character.id != mover_id && character.location_id == location_id)
+            .map(|character| character.id.clone())
+            .collect::<Vec<_>>();
+        for recipient in recipients {
+            self.create_notification(
+                &recipient,
+                "same_location_entry",
+                &format!("{mover_name} arrived nearby."),
+                [
+                    ("character_id".to_string(), mover_id.to_string()),
+                    ("location_id".to_string(), location_id.to_string()),
+                ],
+            );
+        }
+    }
+
     pub fn ensure_growth_capacity(&mut self) {
         let free_homes = self.available_home_count();
         let cafe_capacity = self
@@ -1557,7 +1883,11 @@ impl Engine {
         summary: &str,
         related: [(String, String); N],
     ) {
-        let notification_id = format!("notif.{}", self.state.next_event_id);
+        let notification_id = format!(
+            "notif.{}.{}",
+            self.state.tick,
+            self.state.notifications.len() + 1
+        );
         self.state.notifications.insert(
             notification_id.clone(),
             Notification {
@@ -2646,6 +2976,125 @@ mod tests {
     }
 
     #[test]
+    fn observe_agent_returns_compact_runtime_payload() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        create(&mut engine, "char_ren", "Ren");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_ren", "village.main_street");
+        let response = engine.apply(env(
+            "char_ren",
+            Command::Say {
+                target: SpeechTarget::Character("char_mira".to_string()),
+                text: "Coffee later?".to_string(),
+            },
+        ));
+        assert!(response.ok, "{response:?}");
+
+        let observation = engine.observe_agent("char_mira").unwrap();
+        assert_eq!(observation.wake_reason, "directed_speech");
+        assert_eq!(observation.actor.id, "char_mira");
+        assert_eq!(
+            observation.limits.max_actions_this_wake,
+            MAX_ACTIONS_PER_WAKE
+        );
+        assert!(
+            observation
+                .nearby_agents
+                .iter()
+                .any(|agent| agent.id == "char_ren")
+        );
+        assert!(observation.notifications.iter().any(|notification| {
+            notification.kind == "directed_speech" && notification.character_id == "char_mira"
+        }));
+        assert!(
+            observation
+                .memory_hints
+                .stable_ids
+                .iter()
+                .any(|id| id == "char_ren")
+        );
+        assert!(
+            observation
+                .available_affordances
+                .iter()
+                .any(|action| action.action == "say")
+        );
+    }
+
+    #[test]
+    fn directed_speech_arrivals_and_queues_create_wake_notifications() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        create(&mut engine, "char_ren", "Ren");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_ren", "village.main_street");
+
+        let direct = engine.apply(env(
+            "char_mira",
+            Command::Say {
+                target: SpeechTarget::Character("char_ren".to_string()),
+                text: "Hello Ren.".to_string(),
+            },
+        ));
+        assert!(direct.ok, "{direct:?}");
+        let ren_notifications = engine.notifications_for("char_ren", false);
+        assert_eq!(
+            ren_notifications
+                .iter()
+                .filter(|notification| notification.kind == "directed_speech")
+                .count(),
+            1
+        );
+
+        move_to(&mut engine, "char_ren", "village.cafe");
+        move_to(&mut engine, "char_mira", "village.cafe");
+        assert!(
+            engine
+                .notifications_for("char_ren", false)
+                .iter()
+                .any(|notification| notification.kind == "same_location_entry")
+        );
+
+        let queue = engine.apply(env(
+            "char_mira",
+            Command::Queue {
+                actions: vec![QueuedCommand {
+                    command: QueueableCommand::Wait { ticks: 1 },
+                }],
+            },
+        ));
+        assert!(queue.ok, "{queue:?}");
+        engine.advance_ticks(1);
+        assert!(
+            engine
+                .notifications_for("char_mira", false)
+                .iter()
+                .any(|notification| notification.kind == "queue_completed")
+        );
+
+        create(&mut engine, "char_otto", "Otto");
+        let failed_queue = engine.apply(env(
+            "char_otto",
+            Command::Queue {
+                actions: vec![QueuedCommand {
+                    command: QueueableCommand::Order {
+                        service_id: "village.cafe.service_window".to_string(),
+                        item: "coffee".to_string(),
+                    },
+                }],
+            },
+        ));
+        assert!(failed_queue.ok, "{failed_queue:?}");
+        assert!(
+            engine
+                .notifications_for("char_otto", false)
+                .iter()
+                .any(|notification| notification.kind == "queue_failed")
+        );
+    }
+
+    #[test]
     fn queue_empty_insufficient_and_wait_steps_are_covered() {
         let mut engine = engine();
         create(&mut engine, "char_mira", "Mira");
@@ -2744,6 +3193,7 @@ mod tests {
             description: "return".to_string(),
             promise_id: None,
             reserved_coins: 0,
+            queued: false,
         });
         engine.advance_ticks(1);
         assert_eq!(
@@ -2767,6 +3217,7 @@ mod tests {
             description: "no target".to_string(),
             promise_id: None,
             reserved_coins: 0,
+            queued: false,
         });
         engine.advance_ticks(1);
         assert!(

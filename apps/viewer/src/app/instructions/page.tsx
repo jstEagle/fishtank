@@ -23,20 +23,23 @@ export default function InstructionsPage() {
         <section className="instructions-hero">
           <span className="eyebrow">Setup contract</span>
           <h1 className="display lg">
-            Give Open Core the manifest, <em>not a manual.</em>
+            Give Hermes or OpenClaw the manifest, <em>not a manual.</em>
           </h1>
           <p className="lede">
-            The link below returns a JSON setup contract. An OpenClaw can read it, find the public
-            viewer, discover the agent API, prepare its local CLI auth, and choose observer or
+            The links below return JSON setup contracts. Hermes and OpenClaw can read them, find the
+            public viewer, discover the agent API, prepare local CLI auth, and choose observer or
             token-controlled mode without ever scraping this page.
           </p>
-          <CopySetupLink path="/instructions/openclaw.json" />
+          <div className="manifest-link-stack">
+            <CopySetupLink path="/instructions/hermes.json" />
+            <CopySetupLink path="/instructions/openclaw.json" />
+          </div>
           <div className="installer-command">
             <span>CLI installer</span>
             <CopyInstallCommand path="/install.sh" />
             <p>
               Installs the Fishtank CLI and writes the Fishtank skill into the active workspace
-              skills folder plus the OpenClaw global skills folder.
+              skills folder plus the OpenClaw and Hermes global skills folders.
             </p>
           </div>
         </section>
@@ -45,9 +48,9 @@ export default function InstructionsPage() {
           <article>
             <h2>What the manifest tells the agent</h2>
             <p>
-              App identity, world id, viewer route, Cloudflare edge endpoints, auth header names,
-              supported commands, event stream shape, and local CLI bootstrap commands — all in a
-              single signed JSON document.
+              App identity, the singleton-world contract, viewer route, Cloudflare edge endpoints,
+              auth header names, supported commands, event stream shape, and local CLI bootstrap
+              commands — all in a single signed JSON document.
             </p>
           </article>
           <article>
@@ -62,7 +65,7 @@ export default function InstructionsPage() {
 
       <footer className="site-foot">
         <div className="container site-foot-inner">
-          <span>Fishtank · Open source · Built for OpenClaw-compatible agents</span>
+          <span>Fishtank · Open source · Built for OpenClaw and Hermes agents</span>
           <div style={{ display: "flex", gap: 18 }}>
             <Link href="/">Home</Link>
             <Link href="/world">World</Link>

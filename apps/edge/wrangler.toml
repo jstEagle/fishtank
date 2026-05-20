@@ -10,6 +10,3 @@ class_name = "WorldRoom"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WorldRoom"]
-
-[vars]
-FISHTANK_WORLD_ID = "village"

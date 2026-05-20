@@ -4,7 +4,11 @@ use fishtank_protocol::{
     AuthenticatedCharacterRequest, Command, CommandEnvelope, Direction, HomeAction, MoveMode,
     NotificationAction, SCHEMA_VERSION, SpeechTarget,
 };
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use time::OffsetDateTime;
 
 #[derive(Parser)]
@@ -19,7 +23,7 @@ struct Cli {
     #[arg(
         long,
         env = "FISHTANK_CORE_URL",
-        default_value = "https://fishtank-production-0846.up.railway.app"
+        default_value = "http://127.0.0.1:3838"
     )]
     core_url: String,
     #[arg(long, env = "FISHTANK_CHARACTER", default_value = "char_local")]
@@ -39,6 +43,7 @@ enum Commands {
         command: CharacterCommands,
     },
     Observe,
+    ObserveAgent,
     Actions,
     Move(MoveArgs),
     Say(SayArgs),
@@ -51,6 +56,10 @@ enum Commands {
     Notifications {
         #[command(subcommand)]
         command: NotificationCommands,
+    },
+    Life {
+        #[command(subcommand)]
+        command: LifeCommands,
     },
     Events(EventsArgs),
     Snapshot,
@@ -149,7 +158,21 @@ enum HomeCommands {
 #[derive(Subcommand)]
 enum NotificationCommands {
     List,
+    Wait(NotificationWaitArgs),
     Ack { notification_id: String },
+}
+
+#[derive(Subcommand)]
+enum LifeCommands {
+    Wake,
+}
+
+#[derive(Args)]
+struct NotificationWaitArgs {
+    #[arg(long, default_value_t = 30000)]
+    timeout_ms: u64,
+    #[arg(long, default_value_t = 1000)]
+    poll_ms: u64,
 }
 
 #[derive(Subcommand)]
@@ -251,6 +274,11 @@ async fn main() -> Result<()> {
         Commands::Observe => {
             print_json(
                 get_observation(&client, &cli.url, &cli.character, token.as_deref()).await?,
+            )?;
+        }
+        Commands::ObserveAgent => {
+            print_json(
+                get_agent_observation(&client, &cli.url, &cli.character, token.as_deref()).await?,
             )?;
         }
         Commands::Actions => {
@@ -415,6 +443,17 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             }
+            NotificationCommands::Wait(args) => {
+                wait_for_notifications(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    args.timeout_ms,
+                    args.poll_ms,
+                )
+                .await?;
+            }
             NotificationCommands::Ack { notification_id } => {
                 send_command(
                     &client,
@@ -428,11 +467,18 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
+        Commands::Life { command } => match command {
+            LifeCommands::Wake => {
+                print_json(
+                    life_wake_packet(&client, &cli.url, &cli.character, token.as_deref()).await?,
+                )?;
+            }
+        },
         Commands::Events(args) => {
             let mut request = if let Some(token) = token.as_deref() {
                 agent_request(client.get(format!("{}/v1/events", cli.url)), token)
             } else if is_hosted_api(&cli.url) {
-                client.get(format!("{}/v1/worlds/village/events", cli.url))
+                client.get(format!("{}/v1/events", cli.url))
             } else {
                 client.get(format!("{}/events", cli.url))
             };
@@ -450,7 +496,7 @@ async fn main() -> Result<()> {
         }
         Commands::Snapshot => {
             let request = if is_hosted_api(&cli.url) {
-                client.get(format!("{}/v1/worlds/village/snapshot", cli.url))
+                client.get(format!("{}/v1/snapshot", cli.url))
             } else {
                 client.get(format!("{}/snapshot", cli.url))
             };
@@ -532,6 +578,16 @@ async fn send_command(
     token: Option<&str>,
     command: Command,
 ) -> Result<()> {
+    print_json(request_command(client, url, character_id, token, command).await?)
+}
+
+async fn request_command(
+    client: &reqwest::Client,
+    url: &str,
+    character_id: &str,
+    token: Option<&str>,
+    command: Command,
+) -> Result<serde_json::Value> {
     if let Some(token) = token {
         let response = agent_request(
             client.post(format!("{url}/v1/command")).json(&command),
@@ -545,7 +601,7 @@ async fn send_command(
         .json::<serde_json::Value>()
         .await
         .context("failed to parse command response")?;
-        return print_json(response);
+        return Ok(response);
     }
     if is_hosted_api(url) {
         anyhow::bail!(
@@ -574,7 +630,44 @@ async fn send_command(
         .json::<serde_json::Value>()
         .await
         .context("failed to parse command response")?;
-    print_json(response)
+    Ok(response)
+}
+
+async fn wait_for_notifications(
+    client: &reqwest::Client,
+    url: &str,
+    character_id: &str,
+    token: Option<&str>,
+    timeout_ms: u64,
+    poll_ms: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let poll_interval = Duration::from_millis(poll_ms.max(100));
+    loop {
+        let response = request_command(
+            client,
+            url,
+            character_id,
+            token,
+            Command::Notifications {
+                action: NotificationAction::List,
+            },
+        )
+        .await?;
+        if notification_count(&response) > 0 || Instant::now() >= deadline {
+            return print_json(response);
+        }
+        tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now())))
+            .await;
+    }
+}
+
+fn notification_count(response: &serde_json::Value) -> usize {
+    response
+        .get("result")
+        .and_then(|result| result.get("notifications"))
+        .and_then(|notifications| notifications.as_array())
+        .map_or(0, Vec::len)
 }
 
 async fn get_observation(
@@ -586,7 +679,7 @@ async fn get_observation(
     let request = if let Some(token) = token {
         agent_request(client.get(format!("{url}/v1/observe")), token)
     } else if is_hosted_api(url) {
-        client.get(format!("{url}/v1/worlds/village/snapshot"))
+        client.get(format!("{url}/v1/snapshot"))
     } else {
         client.get(format!("{url}/characters/{character_id}/observe"))
     };
@@ -596,6 +689,91 @@ async fn get_observation(
         .error_for_status()?
         .json::<serde_json::Value>()
         .await?)
+}
+
+async fn get_agent_observation(
+    client: &reqwest::Client,
+    url: &str,
+    character_id: &str,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let request = if let Some(token) = token {
+        agent_request(client.get(format!("{url}/v1/observe/agent")), token)
+    } else if is_hosted_api(url) {
+        anyhow::bail!(
+            "observe-agent requires a Fishtank token; run `fishtank character create --name <name>` first"
+        );
+    } else {
+        client.get(format!("{url}/characters/{character_id}/observe-agent"))
+    };
+    Ok(request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?)
+}
+
+async fn life_wake_packet(
+    client: &reqwest::Client,
+    url: &str,
+    character_id: &str,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let observation = get_agent_observation(client, url, character_id, token).await?;
+    let actor_id = observation
+        .get("actor")
+        .and_then(|actor| actor.get("id"))
+        .and_then(|id| id.as_str())
+        .unwrap_or(character_id);
+    let memory_path = agent_memory_path(actor_id)?;
+    let local_memory = if memory_path.exists() {
+        let raw = std::fs::read_to_string(&memory_path)?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }))
+    } else {
+        serde_json::json!(null)
+    };
+    let wake_reason = observation
+        .get("wake_reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or("idle_timeout");
+    let max_actions = observation
+        .get("limits")
+        .and_then(|limits| limits.get("max_actions_this_wake"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(3);
+    Ok(serde_json::json!({
+        "kind": "fishtank_life_wake",
+        "wake_reason": wake_reason,
+        "memory_path": memory_path,
+        "local_memory": local_memory,
+        "observation": observation,
+        "instructions": {
+            "max_actions": max_actions,
+            "action_loop": [
+                "Review observation and local_memory.",
+                "Choose zero to max_actions normal Fishtank CLI actions.",
+                "Use fishtank move, say, act, wait, home, or notifications.",
+                "Update local memory at memory_path if useful.",
+                "Sleep or call fishtank notifications wait before the next wake."
+            ],
+            "server_state_boundary": "Do not store goals, relationships, routines, or private memory on the Fishtank server."
+        },
+        "markdown": format!(
+            "Wake reason: {wake_reason}\nMemory: {}\nChoose up to {max_actions} action(s), then persist local memory and sleep.",
+            memory_path.display()
+        )
+    }))
+}
+
+fn agent_memory_path(character_id: &str) -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home)
+        .join(".fishtank")
+        .join("agents")
+        .join(character_id)
+        .join("memory.json"))
 }
 
 fn is_hosted_api(url: &str) -> bool {

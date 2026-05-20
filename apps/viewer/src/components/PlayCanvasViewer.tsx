@@ -61,7 +61,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
   const snapshotRef = useRef<WorldSnapshot | null>(props.snapshot);
   const selectedRef = useRef<string | null>(props.selectedCharacterId);
   const hoveredRef = useRef<PickedInfo | null>(null);
-  const tickClockRef = useRef({ tick: props.snapshot?.tick ?? 0, at: performance.now() });
+  const tickClockRef = useRef({ tick: props.snapshot?.tick ?? 0, at: 0 });
   const sceneSignatureRef = useRef<string | null>(null);
   const propsRef = useRef(props);
 
@@ -71,7 +71,10 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
 
   useEffect(() => {
     const now = performance.now();
-    const currentEstimate = estimatedViewerTick(tickClockRef.current, now);
+    const currentEstimate =
+      tickClockRef.current.at === 0
+        ? (props.snapshot?.tick ?? 0)
+        : estimatedViewerTick(tickClockRef.current, now);
     snapshotRef.current = props.snapshot;
     if (props.snapshot) {
       tickClockRef.current = {
@@ -108,7 +111,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     // -------- camera rig --------
     const camera = new pc.Entity("camera");
     camera.addComponent("camera", {
-      clearColor: color("#f4ecdc"),
+      clearColor: color("#ffffff"),
       fov: 26,
       nearClip: 0.1,
       farClip: 240
@@ -169,7 +172,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     const currentCharacterRigs = characterRigs.current;
     const currentLocationRigs = locationRigs.current;
 
-    const ground = primitive("ground", "box", flat("#ede2c8"), { x: 90, y: 0.2, z: 90 });
+    const ground = primitive("ground", "box", flat("#fcf2c4"), { x: 90, y: 0.2, z: 90 });
     setReceiveOnly(ground);
     ground.setPosition(0, -0.11, 0);
     app.root.addChild(ground);
@@ -667,8 +670,8 @@ function buildWorldGrid(snapshot: WorldSnapshot) {
     }
   }
 
-  const lineMaterial = flat("#eadfca");
-  const majorMaterial = flat("#ded2bd");
+  const lineMaterial = flat("#f1e8b4");
+  const majorMaterial = flat("#e2d597");
   const lineWidth = 0.012;
   for (let x = 0; x <= bounds.width; x++) {
     const worldX = bounds.minX + x * bounds.cell;
@@ -709,14 +712,14 @@ function buildWorldGrid(snapshot: WorldSnapshot) {
 function groundColor(terrain: GroundType) {
   switch (terrain) {
     case "grass":
-      return "#d7ecc5";
+      return "#e7f3d3";
     case "path":
-      return "#fff9e8";
+      return "#fff8d8";
     case "water":
-      return "#9ed7e8";
+      return "#bfe4ee";
     case "ground":
     default:
-      return "#f2ead9";
+      return "#fdf5cf";
   }
 }
 

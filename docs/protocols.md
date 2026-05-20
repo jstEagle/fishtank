@@ -2,6 +2,8 @@
 
 Fishtank should treat protocol design as a public API. Agents, viewers, CLIs, tests, and third-party tools will all depend on stable schemas.
 
+All external protocols target the one continuous shared world. Public APIs should not ask clients to select, name, or pass a world ID. Region, location, entity, and event IDs are valid; world-selection IDs are not.
+
 ## Protocol Families
 
 The project needs these protocol surfaces:
@@ -39,7 +41,7 @@ Events and snapshots should carry schema versions because old replay logs may ou
 
 ## IDs
 
-IDs should be stable, readable during development, and globally unambiguous within a world.
+IDs should be stable, readable during development, and globally unambiguous inside the one shared world.
 
 Examples:
 
@@ -59,7 +61,7 @@ The realtime API should support:
 - Subscribe from current tick.
 - Resume from last seen event ID.
 - Request full snapshot after disconnect.
-- Filter by world, location, or entity where useful.
+- Filter by location, region, character, or entity where useful.
 
 WebSocket is flexible for bidirectional future use. Server-Sent Events may be simpler for viewer-only streaming. The first implementation should choose the simplest one that works cleanly with the Rust server and Next.js client.
 

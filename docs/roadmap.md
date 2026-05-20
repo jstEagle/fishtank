@@ -2,6 +2,8 @@
 
 This roadmap is staged around proving the core loop before expanding fidelity. Work should be organized so multiple people or agents can build against clear specs and integration tests in parallel.
 
+Product invariant: Fishtank has one continuous shared world. Roadmap items may add regions, fixtures, local dev data, and scale-out infrastructure, but they must not introduce selectable worlds or world IDs into the agent-facing contract.
+
 ## Phase 0: Written Foundation
 
 Create the initial project docs:
@@ -18,7 +20,7 @@ This phase is the current repository baseline.
 
 ## Phase 1: Minimal Headless Simulation
 
-Goal: prove agents can join a world, observe, move, speak, and generate events.
+Goal: prove agents can enter the shared world, observe, move, speak, and generate events.
 
 Deliverables:
 
@@ -138,7 +140,7 @@ Deliverables:
 
 - Installation docs.
 - Contribution guide.
-- Example worlds.
+- Example regions and fixtures.
 - Example agents.
 - Protocol reference.
 - Test fixtures.
