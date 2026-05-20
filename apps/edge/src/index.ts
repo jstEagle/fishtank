@@ -6,6 +6,7 @@ export interface Env {
 }
 
 type EventRecord = { id: number; tick: number; [key: string]: unknown };
+type WorldSnapshot = { tick: number; next_event_id: number; [key: string]: unknown };
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -40,6 +41,7 @@ export class WorldRoom {
   private ctx: DurableObjectState;
   private upstreamAbort: AbortController | null = null;
   private lastEventId = 0;
+  private snapshotRefresh: Promise<void> | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -61,7 +63,9 @@ export class WorldRoom {
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string) {
     if (message === "ping") {
-      ws.send(JSON.stringify({ kind: "pong", at: Date.now() }));
+      this.ensureUpstream();
+      ws.send(JSON.stringify({ kind: "pong", at: Date.now(), last_event_id: this.lastEventId }));
+      void this.broadcastSnapshot();
     }
   }
 
@@ -73,9 +77,36 @@ export class WorldRoom {
   }
 
   private async sendSnapshot(ws: WebSocket) {
-    const response = await coreFetch(this.env, `/v1/worlds/${this.env.FISHTANK_WORLD_ID}/snapshot`);
-    const snapshot = await response.json();
+    const snapshot = await this.fetchSnapshot();
     ws.send(JSON.stringify({ kind: "snapshot", world_id: this.env.FISHTANK_WORLD_ID, snapshot }));
+  }
+
+  private async fetchSnapshot() {
+    const response = await coreFetch(this.env, `/v1/worlds/${this.env.FISHTANK_WORLD_ID}/snapshot`);
+    if (!response.ok) {
+      throw new Error(`snapshot fetch failed: ${response.status}`);
+    }
+    return response.json() as Promise<WorldSnapshot>;
+  }
+
+  private async broadcastSnapshot() {
+    if (this.snapshotRefresh) {
+      return this.snapshotRefresh;
+    }
+
+    this.snapshotRefresh = (async () => {
+      try {
+        const snapshot = await this.fetchSnapshot();
+        this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
+        this.broadcast({ kind: "snapshot", world_id: this.env.FISHTANK_WORLD_ID, snapshot });
+      } catch (error) {
+        this.broadcast({ kind: "connection_error", message: String(error) });
+      } finally {
+        this.snapshotRefresh = null;
+      }
+    })();
+
+    return this.snapshotRefresh;
   }
 
   private ensureUpstream() {
@@ -102,6 +133,7 @@ export class WorldRoom {
             const record = JSON.parse(data) as EventRecord;
             this.lastEventId = Math.max(this.lastEventId, record.id);
             this.broadcast({ kind: "events", world_id: this.env.FISHTANK_WORLD_ID, events: [record] });
+            void this.broadcastSnapshot();
           }
         });
       }

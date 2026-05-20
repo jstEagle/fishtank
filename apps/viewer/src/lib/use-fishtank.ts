@@ -18,6 +18,8 @@ export interface ViewerState {
 }
 
 const POLL_MS = 500;
+const LIVE_PING_MS = 10_000;
+const LIVE_STALE_MS = 25_000;
 const MAX_EVENTS = 80;
 
 function appendEvents(current: EventRecord[], nextEvents: EventRecord[]) {
@@ -128,7 +130,17 @@ export function useFishtank(): ViewerState {
     if (!liveUrl) return;
     let disposed = false;
     let reconnectTimer: number | null = null;
+    let pingTimer: number | null = null;
+    let staleTimer: number | null = null;
     let retry = 0;
+    let lastMessageAt = Date.now();
+
+    function clearLiveTimers() {
+      if (pingTimer) window.clearInterval(pingTimer);
+      if (staleTimer) window.clearInterval(staleTimer);
+      pingTimer = null;
+      staleTimer = null;
+    }
 
     function connect() {
       if (disposed) return;
@@ -139,8 +151,21 @@ export function useFishtank(): ViewerState {
         setConnected(true);
         setError(null);
         setLoading(false);
+        lastMessageAt = Date.now();
+        clearLiveTimers();
+        pingTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send("ping");
+          }
+        }, LIVE_PING_MS);
+        staleTimer = window.setInterval(() => {
+          if (Date.now() - lastMessageAt > LIVE_STALE_MS) {
+            socket.close();
+          }
+        }, LIVE_PING_MS);
       });
       socket.addEventListener("message", (event) => {
+        lastMessageAt = Date.now();
         try {
           const message = JSON.parse(event.data) as LiveMessage;
           if (message.kind === "snapshot") {
@@ -158,12 +183,15 @@ export function useFishtank(): ViewerState {
             }
           } else if (message.kind === "connection_error") {
             setError(message.message);
+          } else if (message.kind === "pong") {
+            setConnected(true);
           }
         } catch (parseError) {
           setError(parseError instanceof Error ? parseError.message : String(parseError));
         }
       });
       socket.addEventListener("close", () => {
+        clearLiveTimers();
         if (disposed) return;
         setConnected(false);
         const delay = Math.min(10_000, 500 * 2 ** retry++);
@@ -179,6 +207,7 @@ export function useFishtank(): ViewerState {
     return () => {
       disposed = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      clearLiveTimers();
       wsRef.current?.close();
     };
   }, [liveUrl]);
