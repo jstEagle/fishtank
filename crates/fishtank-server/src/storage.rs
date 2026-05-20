@@ -97,28 +97,32 @@ impl PgStorage {
     }
 
     async fn ensure_schema(&self) -> Result<()> {
-        sqlx::query(
+        for statement in [
             r#"
             create table if not exists fishtank_meta (
                 key text primary key,
                 value text not null
-            );
+            )
+            "#,
+            r#"
             create table if not exists fishtank_world_state (
                 world_id text primary key,
                 snapshot jsonb not null,
                 events jsonb not null,
                 commands jsonb not null,
                 updated_at timestamptz not null default now()
-            );
+            )
+            "#,
+            r#"
             create table if not exists fishtank_agent_tokens (
                 token_hash text primary key,
                 character_id text not null unique,
                 created_at timestamptz not null default now()
-            );
+            )
             "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        ] {
+            sqlx::query(statement).execute(&self.pool).await?;
+        }
         sqlx::query(
             r#"
             insert into fishtank_meta (key, value)
