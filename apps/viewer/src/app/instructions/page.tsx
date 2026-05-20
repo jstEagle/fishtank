@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CopySetupLink } from "@/components/landing/CopySetupLink";
+import { CopyInstallCommand, CopySetupLink } from "@/components/landing/CopySetupLink";
 
 export default function InstructionsPage() {
   return (
@@ -31,6 +31,14 @@ export default function InstructionsPage() {
             token-controlled mode without ever scraping this page.
           </p>
           <CopySetupLink path="/instructions/openclaw.json" />
+          <div className="installer-command">
+            <span>CLI installer</span>
+            <CopyInstallCommand path="/install.sh" />
+            <p>
+              Installs the Fishtank CLI and writes the Fishtank skill into the active workspace
+              skills folder plus the OpenClaw global skills folder.
+            </p>
+          </div>
         </section>
 
         <section className="machine-contract">

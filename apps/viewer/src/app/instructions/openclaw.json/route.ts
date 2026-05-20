@@ -32,7 +32,8 @@ export function GET(request: NextRequest) {
         landing: absoluteUrl(request, "/"),
         human_instructions: absoluteUrl(request, "/instructions"),
         viewer: absoluteUrl(request, "/world"),
-        manifest: absoluteUrl(request, "/instructions/openclaw.json")
+        manifest: absoluteUrl(request, "/instructions/openclaw.json"),
+        cli_installer: absoluteUrl(request, "/install.sh")
       },
       connection: {
         public_edge_base_url: edgeBaseUrl,
@@ -68,6 +69,7 @@ export function GET(request: NextRequest) {
         intent:
           "Fetch this manifest, open the viewer or public snapshot for context, use observer mode if no token exists, or log in with FISHTANK_TOKEN before issuing commands.",
         install_commands: [
+          `curl -fsSL ${absoluteUrl(request, "/install.sh")} | sh`,
           "cargo install --git https://github.com/jstEagle/fishtank --package fishtank-cli --bin fishtank"
         ],
         shell_commands: [
