@@ -13,7 +13,7 @@ import {
   type Vec3
 } from "@/lib/world-layout";
 
-const TICKS_PER_REAL_SECOND = 5;
+const TICKS_PER_REAL_SECOND = 1;
 const PICK_RADIUS_PX = 56;
 const DRAG_THRESHOLD_PX = 6;
 
@@ -61,7 +61,8 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
   const snapshotRef = useRef<WorldSnapshot | null>(props.snapshot);
   const selectedRef = useRef<string | null>(props.selectedCharacterId);
   const hoveredRef = useRef<PickedInfo | null>(null);
-  const snapshotArrivedAtRef = useRef<number>(0);
+  const tickClockRef = useRef({ tick: props.snapshot?.tick ?? 0, at: performance.now() });
+  const sceneSignatureRef = useRef<string | null>(null);
   const propsRef = useRef(props);
 
   useEffect(() => {
@@ -69,8 +70,15 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
   }, [props]);
 
   useEffect(() => {
+    const now = performance.now();
+    const currentEstimate = estimatedViewerTick(tickClockRef.current, now);
     snapshotRef.current = props.snapshot;
-    snapshotArrivedAtRef.current = performance.now();
+    if (props.snapshot) {
+      tickClockRef.current = {
+        tick: Math.max(props.snapshot.tick, currentEstimate),
+        at: now
+      };
+    }
   }, [props.snapshot]);
 
   useEffect(() => {
@@ -207,12 +215,13 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
 
       const nodes = buildLocationLayout(current);
       const byLocation = locationMap(nodes);
+      const estimatedTick = estimatedViewerTick(tickClockRef.current, now);
 
       // Update characters: position lerp + bob + scale highlight.
       for (const character of Object.values(current.characters)) {
         const rig = characterRigs.current.get(character.id);
         if (!rig) continue;
-        const position = characterPosition(character, current, byLocation, snapshotArrivedAtRef.current);
+        const position = characterPosition(character, current, byLocation, estimatedTick);
         const bob = Math.sin(now / 220 + rig.bobSeed) * 0.08;
         rig.entity.setPosition(position.x, position.y + 0.55 + bob, position.z);
 
@@ -425,6 +434,9 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     const root = rootRef.current;
     const snapshot = props.snapshot;
     if (!app || !root || !snapshot) return;
+    const signature = sceneSignature(snapshot);
+    if (sceneSignatureRef.current === signature) return;
+    sceneSignatureRef.current = signature;
 
     // Clear prior children.
     root.children.slice().forEach((child) => child.destroy());
@@ -476,7 +488,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     // Characters.
     for (const character of Object.values(snapshot.characters)) {
       const rig = buildCharacter(character);
-      const position = characterPosition(character, snapshot, byLocation, snapshotArrivedAtRef.current);
+      const position = characterPosition(character, snapshot, byLocation, snapshot.tick);
       rig.entity.setPosition(position.x, position.y + 0.55, position.z);
       root.addChild(rig.entity);
       characterRigs.current.set(character.id, rig);
@@ -933,7 +945,7 @@ function characterPosition(
   character: Character,
   snapshot: WorldSnapshot,
   byLocation: Map<string, LocationRenderNode>,
-  arrivedAt: number
+  estimatedTick: number
 ): Vec3 {
   const from = byLocation.get(character.location_id)?.position ?? { x: 0, y: 0, z: 0 };
   const activity = character.current_activity;
@@ -946,15 +958,38 @@ function characterPosition(
     const to = byLocation.get(activity.target_id)?.position;
     if (to) {
       const duration = Math.max(1, activity.completes_at_tick - activity.started_at_tick);
-      const wallClockTicks = ((performance.now() - arrivedAt) / 1000) * TICKS_PER_REAL_SECOND;
-      const estimatedTick = Math.min(activity.completes_at_tick - 0.2, snapshot.tick + wallClockTicks);
-      const progress = clamp((estimatedTick - activity.started_at_tick) / duration, 0, 0.94);
+      const timelineTick = Math.min(
+        activity.completes_at_tick - 0.2,
+        Math.max(snapshot.tick, estimatedTick)
+      );
+      const progress = clamp((timelineTick - activity.started_at_tick) / duration, 0, 0.94);
       const eased = easeInOut(progress);
       return lerp(from, to, eased);
     }
   }
 
   return from;
+}
+
+function estimatedViewerTick(clock: { tick: number; at: number }, now: number) {
+  return clock.tick + ((now - clock.at) / 1000) * TICKS_PER_REAL_SECOND;
+}
+
+function sceneSignature(snapshot: WorldSnapshot) {
+  const characterIds = Object.keys(snapshot.characters).sort();
+  return JSON.stringify({
+    world: "single_shared_world",
+    locations: snapshot.world.locations.map((location) => [
+      location.id,
+      location.grid_position.x,
+      location.grid_position.y,
+      location.grid_size.width,
+      location.grid_size.height,
+      location.facing
+    ]),
+    services: snapshot.world.services.map((service) => [service.id, service.location_id]),
+    characters: characterIds
+  });
 }
 
 function lerp(from: Vec3, to: Vec3, progress: number): Vec3 {
