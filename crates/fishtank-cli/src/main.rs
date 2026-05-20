@@ -7,9 +7,13 @@ use fishtank_protocol::{
 use std::{
     env,
     path::PathBuf,
+    process::Command as ProcessCommand,
     time::{Duration, Instant},
 };
 use time::OffsetDateTime;
+
+const DEFAULT_REPO_URL: &str = "https://github.com/jstEagle/fishtank";
+const UPDATE_CHECK_CACHE_SECS: u64 = 30 * 60;
 
 #[derive(Parser)]
 #[command(name = "fishtank", author, version, about)]
@@ -60,6 +64,10 @@ enum Commands {
     Life {
         #[command(subcommand)]
         command: LifeCommands,
+    },
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommands,
     },
     Events(EventsArgs),
     Snapshot,
@@ -165,6 +173,28 @@ enum NotificationCommands {
 #[derive(Subcommand)]
 enum LifeCommands {
     Wake,
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    Check(UpdateCheckArgs),
+    Install(UpdateInstallArgs),
+}
+
+#[derive(Args)]
+struct UpdateCheckArgs {
+    #[arg(long, env = "FISHTANK_REPO_URL", default_value = DEFAULT_REPO_URL)]
+    repo_url: String,
+    #[arg(long)]
+    no_cache: bool,
+}
+
+#[derive(Args)]
+struct UpdateInstallArgs {
+    #[arg(long, env = "FISHTANK_REPO_URL", default_value = DEFAULT_REPO_URL)]
+    repo_url: String,
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -474,6 +504,14 @@ async fn main() -> Result<()> {
                 )?;
             }
         },
+        Commands::Update { command } => match command {
+            UpdateCommands::Check(args) => {
+                print_json(cli_update_status(&args.repo_url, !args.no_cache)?)?;
+            }
+            UpdateCommands::Install(args) => {
+                print_json(install_cli_update(&args.repo_url, args.force)?)?;
+            }
+        },
         Commands::Events(args) => {
             let mut request = if let Some(token) = token.as_deref() {
                 agent_request(client.get(format!("{}/v1/events", cli.url)), token)
@@ -721,6 +759,13 @@ async fn life_wake_packet(
     token: Option<&str>,
 ) -> Result<serde_json::Value> {
     let observation = get_agent_observation(client, url, character_id, token).await?;
+    let cli_update = cli_update_status(DEFAULT_REPO_URL, true).unwrap_or_else(|error| {
+        serde_json::json!({
+            "ok": false,
+            "error": error.to_string(),
+            "recommendation": "Continue the current wake, then run `fishtank update check --no-cache` before the next long-running loop."
+        })
+    });
     let actor_id = observation
         .get("actor")
         .and_then(|actor| actor.get("id"))
@@ -749,10 +794,12 @@ async fn life_wake_packet(
         "memory_path": memory_path,
         "local_memory": local_memory,
         "observation": observation,
+        "cli_update": cli_update,
         "instructions": {
             "max_actions": max_actions,
             "action_loop": [
                 "Review observation and local_memory.",
+                "If cli_update.update_available is true, run fishtank update install and restart this long-running agent process.",
                 "Choose zero to max_actions normal Fishtank CLI actions.",
                 "Use fishtank move, say, act, wait, home, or notifications.",
                 "Update local memory at memory_path if useful.",
@@ -764,6 +811,150 @@ async fn life_wake_packet(
             "Wake reason: {wake_reason}\nMemory: {}\nChoose up to {max_actions} action(s), then persist local memory and sleep.",
             memory_path.display()
         )
+    }))
+}
+
+fn cli_update_status(repo_url: &str, use_cache: bool) -> Result<serde_json::Value> {
+    if use_cache && let Some(cached) = fresh_update_cache(repo_url)? {
+        return Ok(cached);
+    }
+
+    let latest_commit = latest_remote_commit(repo_url)?;
+    let current_commit = option_env!("FISHTANK_BUILD_COMMIT").filter(|value| !value.is_empty());
+    let status = build_update_status(repo_url, current_commit, &latest_commit, "network");
+    write_update_cache(&status)?;
+    Ok(status)
+}
+
+fn build_update_status(
+    repo_url: &str,
+    current_commit: Option<&str>,
+    latest_commit: &str,
+    source: &str,
+) -> serde_json::Value {
+    let update_available = current_commit.map(|commit| commit != latest_commit);
+    serde_json::json!({
+        "ok": true,
+        "repo_url": repo_url,
+        "current_version": env!("CARGO_PKG_VERSION"),
+        "current_commit": current_commit,
+        "latest_commit": latest_commit,
+        "update_available": update_available,
+        "restart_required": update_available.unwrap_or(false),
+        "check_source": source,
+        "checked_at": OffsetDateTime::now_utc().to_string(),
+        "install_command": "fishtank update install",
+        "restart_instruction": "After installing an update, restart the long-running agent process so it executes the new fishtank binary."
+    })
+}
+
+fn latest_remote_commit(repo_url: &str) -> Result<String> {
+    let output = ProcessCommand::new("git")
+        .args(["ls-remote", repo_url, "HEAD"])
+        .output()
+        .with_context(
+            || "failed to run git; install git or set FISHTANK_REPO_URL to a reachable repository",
+        )?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-remote failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .split_whitespace()
+        .next()
+        .filter(|commit| !commit.is_empty())
+        .map(str::to_string)
+        .context("git ls-remote did not return a HEAD commit")
+}
+
+fn fresh_update_cache(repo_url: &str) -> Result<Option<serde_json::Value>> {
+    let path = update_cache_path()?;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    let Ok(age) = metadata.modified()?.elapsed() else {
+        return Ok(None);
+    };
+    if age > Duration::from_secs(UPDATE_CHECK_CACHE_SECS) {
+        return Ok(None);
+    }
+    let mut cached: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    if cached.get("repo_url").and_then(|value| value.as_str()) != Some(repo_url) {
+        return Ok(None);
+    }
+    if let Some(object) = cached.as_object_mut() {
+        object.insert("check_source".to_string(), serde_json::json!("cache"));
+        object.insert(
+            "cache_age_seconds".to_string(),
+            serde_json::json!(age.as_secs()),
+        );
+    }
+    Ok(Some(cached))
+}
+
+fn write_update_cache(status: &serde_json::Value) -> Result<()> {
+    let path = update_cache_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_vec_pretty(status)?)?;
+    Ok(())
+}
+
+fn update_cache_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home)
+        .join(".fishtank")
+        .join("update-check.json"))
+}
+
+fn install_cli_update(repo_url: &str, force: bool) -> Result<serde_json::Value> {
+    let status = cli_update_status(repo_url, false)?;
+    let update_available = status
+        .get("update_available")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    if !force && !update_available {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "updated": false,
+            "reason": "already_current",
+            "status": status
+        }));
+    }
+
+    let output = ProcessCommand::new("cargo")
+        .args([
+            "install",
+            "--git",
+            repo_url,
+            "--package",
+            "fishtank-cli",
+            "--bin",
+            "fishtank",
+            "--locked",
+            "--force",
+        ])
+        .output()
+        .context("failed to run cargo install")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo install failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "updated": true,
+        "previous_status": status,
+        "restart_required": true,
+        "restart_instruction": "Restart the long-running agent process now. Existing fishtank subprocesses will keep using their old in-memory code until they exit.",
+        "stdout": String::from_utf8_lossy(&output.stdout).trim(),
+        "stderr": String::from_utf8_lossy(&output.stderr).trim()
     }))
 }
 

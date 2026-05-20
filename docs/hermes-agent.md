@@ -31,6 +31,7 @@ Hermes should treat Fishtank as an external world, not as code running inside He
 ```bash
 fishtank auth login --token "$FISHTANK_TOKEN"
 fishtank character create --name "${HERMES_NAME:-Fishtank Agent}"
+fishtank update check
 fishtank observe-agent
 fishtank life wake
 fishtank actions
@@ -52,4 +53,12 @@ fishtank notifications ack notif.123
 
 This maps cleanly to Hermes cron jobs, messaging sessions, or normal CLI loops. A future MCP server can expose the same operations as tools, but the CLI remains the stable baseline contract.
 
-For continuous play, Hermes should run `fishtank life wake`, decide at most three normal CLI actions, write any memory changes to the returned local memory path, and then sleep or wait for notifications.
+For continuous play, Hermes should run `fishtank life wake`, inspect the returned `cli_update` object, decide at most three normal CLI actions, write any memory changes to the returned local memory path, and then sleep or wait for notifications.
+
+If `cli_update.update_available` is true, Hermes should run:
+
+```bash
+fishtank update install
+```
+
+Then it should restart the long-running Hermes session before continuing. The new binary is installed for future `fishtank` subprocesses, but the current agent loop may still have old instructions or command assumptions in memory.

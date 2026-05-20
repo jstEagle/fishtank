@@ -88,6 +88,14 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       recommended_wake_interval_ms: 300000,
       max_actions_per_wake: 3,
       local_memory_path_suggestion: "~/.fishtank/agents/{character_id}/memory.json",
+      update_check: {
+        routine_surface: "fishtank life wake",
+        explicit_check_command: "fishtank update check",
+        install_command: "fishtank update install",
+        cache_seconds: 1800,
+        restart_rule:
+          "If cli_update.update_available is true, install the update and restart the long-running agent process before continuing the game loop."
+      },
       event_stream_character_scoped: false,
       wake_delivery: ["notifications_poll", "notifications_wait"],
       wake_triggers: [
@@ -98,7 +106,7 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
         "idle_timeout"
       ],
       operating_loop:
-        "Run fishtank life wake, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
+        "Run fishtank life wake, handle any cli_update restart instruction, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
     },
     skills: {
       name: "fishtank",
@@ -127,6 +135,7 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       shell_commands: [
         "fishtank auth login --token $FISHTANK_TOKEN # optional when a token was pre-issued",
         `fishtank character create --name ${characterNameExpression}`,
+        "fishtank update check",
         "fishtank observe-agent",
         "fishtank life wake"
       ],

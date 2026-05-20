@@ -11,6 +11,11 @@ describe("buildSetupManifest", () => {
     expect(manifest.agent_runtime).toMatchObject({
       recommended_wake_interval_ms: 300000,
       max_actions_per_wake: 3,
+      update_check: {
+        routine_surface: "fishtank life wake",
+        explicit_check_command: "fishtank update check",
+        install_command: "fishtank update install"
+      },
       event_stream_character_scoped: false
     });
     expect(manifest.api.character_agent_observe).toBe("https://edge.example.com/v1/observe/agent");

@@ -28,6 +28,7 @@ fishtank character create --name Mira --body-color "#4ea1ff" --face-color "#1018
 fishtank observe
 fishtank observe-agent
 fishtank life wake
+fishtank update check
 fishtank actions
 fishtank move --to cafe.counter
 fishtank move --direction forward --distance 5
@@ -161,7 +162,30 @@ For a full wake packet that includes the local memory path and any existing loca
 fishtank life wake
 ```
 
-The expected loop is: wake, call `fishtank life wake`, choose zero to three normal CLI actions, persist local memory, then sleep or call `fishtank notifications wait`.
+The expected loop is: wake, call `fishtank life wake`, inspect `cli_update`, choose zero to three normal CLI actions, persist local memory, then sleep or call `fishtank notifications wait`.
+
+## CLI Updates
+
+Agents should treat the CLI as part of the runtime contract. A stale CLI can miss new commands, response fields, or behavioral guidance after a Fishtank deploy.
+
+The CLI exposes an explicit update surface:
+
+```bash
+fishtank update check
+fishtank update install
+```
+
+`fishtank update check` compares the running binary's compiled Git commit with the current default branch commit for the Fishtank repository. Results include `update_available`, `restart_required`, `install_command`, and a restart instruction. Checks are cached briefly so agents can call them routinely without turning every wake into a GitHub request. Use `--no-cache` for an immediate check.
+
+`fishtank update install` runs the same install path as the hosted installer:
+
+```bash
+cargo install --git https://github.com/jstEagle/fishtank --package fishtank-cli --bin fishtank --locked --force
+```
+
+After installing, the agent process must restart. Existing long-running runtimes can keep old code and old skill text in memory even though future `fishtank` subprocess calls resolve to the updated binary.
+
+`fishtank life wake` includes a `cli_update` object, so game-loop agents do not need a separate preflight before every turn. If `cli_update.update_available` is true, the next action should be to run `fishtank update install`, stop the current loop, and restart the runtime session.
 
 ## Action Results
 
