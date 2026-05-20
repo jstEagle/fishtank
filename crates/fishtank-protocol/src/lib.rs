@@ -600,6 +600,8 @@ pub struct Notification {
 pub struct TokenCharacter {
     pub token_id: String,
     pub character_id: CharacterId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

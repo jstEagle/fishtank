@@ -163,23 +163,41 @@ async fn main() -> Result<()> {
         },
         Commands::Character { command } => match command {
             CharacterCommands::Create(args) => {
-                if let Some(token) = token.as_deref() {
-                    let response = agent_request(
-                        client.post(format!("{}/v1/character", cli.url)).json(
-                            &AuthenticatedCharacterRequest {
-                                name: args.name,
-                                body_color: args.body_color,
-                                face_color: args.face_color,
-                            },
-                        ),
-                        token,
-                    )
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<serde_json::Value>()
-                    .await?;
+                if is_hosted_api(&cli.url) {
+                    let mut request = client.post(format!("{}/v1/character", cli.url)).json(
+                        &AuthenticatedCharacterRequest {
+                            name: args.name,
+                            body_color: args.body_color,
+                            face_color: args.face_color,
+                        },
+                    );
+                    if let Some(token) = token.as_deref() {
+                        request = agent_request(request, token);
+                    }
+                    let mut response = request
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<serde_json::Value>()
+                        .await?;
+                    if let Some(raw_token) = response
+                        .get("raw_token")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                    {
+                        write_agent_token(&raw_token).await?;
+                        if let Some(object) = response.as_object_mut() {
+                            object.insert(
+                                "stored_token_at".to_string(),
+                                serde_json::json!(token_path()?),
+                            );
+                        }
+                    }
                     print_json(response)?;
+                } else if token.is_some() {
+                    anyhow::bail!(
+                        "agent token auth requires the hosted /v1 API; set FISHTANK_URL to the edge URL"
+                    )
                 } else {
                     send_command(
                         &client,
@@ -384,6 +402,8 @@ async fn main() -> Result<()> {
         Commands::Events(args) => {
             let mut request = if let Some(token) = token.as_deref() {
                 agent_request(client.get(format!("{}/v1/events", cli.url)), token)
+            } else if is_hosted_api(&cli.url) {
+                client.get(format!("{}/v1/worlds/village/events", cli.url))
             } else {
                 client.get(format!("{}/events", cli.url))
             };
@@ -400,11 +420,8 @@ async fn main() -> Result<()> {
             )?;
         }
         Commands::Snapshot => {
-            let request = if let Some(token) = token.as_deref() {
-                agent_request(
-                    client.get(format!("{}/v1/worlds/village/snapshot", cli.url)),
-                    token,
-                )
+            let request = if is_hosted_api(&cli.url) {
+                client.get(format!("{}/v1/worlds/village/snapshot", cli.url))
             } else {
                 client.get(format!("{}/snapshot", cli.url))
             };
@@ -443,6 +460,11 @@ async fn send_command(
         .context("failed to parse command response")?;
         return print_json(response);
     }
+    if is_hosted_api(url) {
+        anyhow::bail!(
+            "no Fishtank token configured; run `fishtank character create --name <name>` first"
+        );
+    }
     let envelope = CommandEnvelope {
         schema_version: SCHEMA_VERSION.to_string(),
         command_id: format!("cmd.{}", OffsetDateTime::now_utc().unix_timestamp_nanos()),
@@ -476,6 +498,8 @@ async fn get_observation(
 ) -> Result<serde_json::Value> {
     let request = if let Some(token) = token {
         agent_request(client.get(format!("{url}/v1/observe")), token)
+    } else if is_hosted_api(url) {
+        client.get(format!("{url}/v1/worlds/village/snapshot"))
     } else {
         client.get(format!("{url}/characters/{character_id}/observe"))
     };
@@ -485,6 +509,10 @@ async fn get_observation(
         .error_for_status()?
         .json::<serde_json::Value>()
         .await?)
+}
+
+fn is_hosted_api(url: &str) -> bool {
+    url.starts_with("https://") || url.contains("workers.dev") || url.contains("/v1")
 }
 
 fn agent_request(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {

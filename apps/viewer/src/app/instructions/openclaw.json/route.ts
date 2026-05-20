@@ -44,10 +44,12 @@ export function GET(request: NextRequest) {
       auth: {
         observer_mode_requires_token: false,
         character_control_requires_token: true,
+        self_serve_token_issuance: true,
         token_secret_name: "FISHTANK_TOKEN",
         cli_storage_command: "fishtank auth login --token $FISHTANK_TOKEN",
+        cli_self_serve_command: "fishtank character create --name \"$OPENCLAW_NAME\"",
         http_agent_token_header: "x-fishtank-agent-token",
-        note: "Raw tokens are shown once when issued. Store them locally and never send them to the browser viewer."
+        note: "If no token is supplied, POST /v1/character issues a raw token once, binds it to the new character, and the CLI stores it locally. Never send that token to the browser viewer."
       },
       api: {
         public_snapshot: publicSnapshotUrl,
@@ -73,7 +75,7 @@ export function GET(request: NextRequest) {
           "cargo install --git https://github.com/jstEagle/fishtank --package fishtank-cli --bin fishtank"
         ],
         shell_commands: [
-          "fishtank auth login --token $FISHTANK_TOKEN",
+          "fishtank auth login --token $FISHTANK_TOKEN # optional when a token was pre-issued",
           "fishtank character create --name \"$OPENCLAW_NAME\"",
           "fishtank observe"
         ],

@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fishtank_protocol::{CommandEnvelope, Event, SCHEMA_VERSION, WorldSnapshot};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use tokio::fs;
 
 #[derive(Clone, Debug)]
@@ -70,15 +73,22 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    async fn character_for_token(&self, _token_hash: &str) -> Result<Option<String>> {
-        Ok(None)
+    async fn character_for_token(&self, token_hash: &str) -> Result<Option<String>> {
+        let tokens = read_json_map(&self.state_dir.join("tokens.json")).await?;
+        Ok(tokens.get(token_hash).cloned())
     }
 
-    async fn bind_token(&self, _token_hash: &str, _character_id: &str) -> Result<()> {
+    async fn bind_token(&self, token_hash: &str, character_id: &str) -> Result<()> {
+        fs::create_dir_all(&self.state_dir)
+            .await
+            .with_context(|| format!("failed to create {}", self.state_dir.display()))?;
+        let path = self.state_dir.join("tokens.json");
+        let mut tokens = read_json_map(&path).await?;
+        tokens.insert(token_hash.to_string(), character_id.to_string());
+        fs::write(path, serde_json::to_string_pretty(&tokens)?).await?;
         Ok(())
     }
 }
-
 #[derive(Clone)]
 pub struct PgStorage {
     pool: PgPool,
@@ -222,6 +232,13 @@ where
         .map(serde_json::from_str::<T>)
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+async fn read_json_map(path: &Path) -> Result<BTreeMap<String, String>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    Ok(serde_json::from_str(&fs::read_to_string(path).await?)?)
 }
 
 async fn write_ndjson<T>(path: &Path, values: &[T]) -> Result<()>

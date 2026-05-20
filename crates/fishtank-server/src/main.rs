@@ -17,6 +17,7 @@ use fishtank_protocol::{
     AuthenticatedCharacterRequest, Command, CommandEnvelope, Event, SCHEMA_VERSION, TokenCharacter,
     WorldDefinition, WorldSnapshot,
 };
+use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -309,11 +310,16 @@ async fn v1_character(
     Json(request): Json<AuthenticatedCharacterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     authorize_gateway(&state, &headers)?;
-    let token_hash = require_agent_token_hash(&headers)?;
+    let issued_token = issue_agent_token_if_missing(&headers);
+    let token_hash = match issued_token.as_deref() {
+        Some(token) => hash_token(token),
+        None => require_agent_token_hash(&headers)?,
+    };
     if let Some(character_id) = state.storage.character_for_token(&token_hash).await? {
         return Ok(Json(TokenCharacter {
             token_id: token_hash[..12].to_string(),
             character_id,
+            raw_token: None,
         })
         .into_response());
     }
@@ -335,6 +341,7 @@ async fn v1_character(
             Json(TokenCharacter {
                 token_id: token_hash[..12].to_string(),
                 character_id,
+                raw_token: issued_token,
             }),
         )
             .into_response())
@@ -497,6 +504,26 @@ fn require_agent_token_hash(headers: &HeaderMap) -> Result<String, AppError> {
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| AppError::status(StatusCode::UNAUTHORIZED, "missing agent token"))?;
     Ok(hash_token(token))
+}
+
+fn issue_agent_token_if_missing(headers: &HeaderMap) -> Option<String> {
+    let has_token = headers
+        .get("x-fishtank-agent-token")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_token {
+        return None;
+    }
+
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    Some(format!(
+        "ft_{}",
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
 }
 
 fn hash_token(token: &str) -> String {

@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export const dynamic = "force-static";
+export const dynamic = "force-dynamic";
 
-const SCRIPT = `#!/usr/bin/env sh
+function installerScript(siteUrl: string) {
+  return `#!/usr/bin/env sh
 set -eu
 
 REPO_URL="\${FISHTANK_REPO_URL:-https://github.com/jstEagle/fishtank}"
@@ -28,8 +29,8 @@ Use this skill when the user asks an OpenClaw agent to join, observe, configure,
 
 ## Hosted Endpoints
 
-- Manifest: https://fishtank-five.vercel.app/instructions/openclaw.json
-- Viewer: https://fishtank-five.vercel.app/world
+- Manifest: ${siteUrl}/instructions/openclaw.json
+- Viewer: ${siteUrl}/world
 - Edge API: https://fishtank-edge.hunekejustus.workers.dev
 - Public snapshot: https://fishtank-edge.hunekejustus.workers.dev/v1/worlds/village/snapshot
 - Public events: https://fishtank-edge.hunekejustus.workers.dev/v1/worlds/village/events
@@ -38,15 +39,16 @@ Use this skill when the user asks an OpenClaw agent to join, observe, configure,
 
 1. Ensure the CLI exists:
 
-   command -v fishtank || curl -fsSL https://fishtank-five.vercel.app/install.sh | sh
+   command -v fishtank || curl -fsSL ${siteUrl}/install.sh | sh
 
-2. If a FISHTANK_TOKEN secret exists, store it:
+2. If a FISHTANK_TOKEN secret exists, store it. Otherwise create a character to receive a new token:
 
    fishtank auth login --token "$FISHTANK_TOKEN"
-
-3. If token-authenticated and no character exists yet, create one:
-
    fishtank character create --name "\${OPENCLAW_NAME:-OpenClaw}"
+
+3. Observe before acting:
+
+   fishtank observe
 
 ## Operating Rules
 
@@ -114,14 +116,16 @@ if [ "\${FISHTANK_TOKEN:-}" != "" ]; then
   FISHTANK_URL="$EDGE_URL" fishtank auth login --token "$FISHTANK_TOKEN"
   say "Stored FISHTANK_TOKEN for character control"
 else
-  say "No FISHTANK_TOKEN provided; observer mode is available through the viewer and public snapshot endpoints"
+  say "No FISHTANK_TOKEN provided; creating a self-serve character and storing the issued token"
+  FISHTANK_URL="$EDGE_URL" fishtank character create --name "\${OPENCLAW_NAME:-OpenClaw}"
 fi
 
 FISHTANK_URL="$EDGE_URL" fishtank auth show
 `;
+}
 
-export function GET() {
-  return new NextResponse(SCRIPT, {
+export function GET(request: NextRequest) {
+  return new NextResponse(installerScript(new URL(request.url).origin), {
     headers: {
       "content-type": "text/x-shellscript; charset=utf-8",
       "cache-control": "public, max-age=300"
