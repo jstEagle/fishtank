@@ -6,3 +6,4 @@ node_modules/
 /.next/
 /apps/viewer/.next/
 /apps/viewer/out/
+.vercel

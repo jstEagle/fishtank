@@ -23,6 +23,7 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     path::PathBuf,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -46,9 +47,9 @@ enum Commands {
         #[arg(long, default_value = ".fishtank/dev")]
         state: PathBuf,
         #[arg(long, env = "FISHTANK_BIND")]
-        bind: Option<SocketAddr>,
+        bind: Option<String>,
         #[arg(long, env = "PORT")]
-        port: Option<u16>,
+        port: Option<String>,
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
         #[arg(long, env = "FISHTANK_GATEWAY_SECRET")]
@@ -97,12 +98,26 @@ async fn main() -> Result<()> {
             gateway_secret,
             world_id,
         } => {
-            let bind =
-                bind.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], port.unwrap_or(3838))));
+            let bind = resolve_bind(bind, port)?;
             serve(world, state, bind, database_url, gateway_secret, world_id).await
         }
         Commands::Replay { world, commands } => replay(world, commands).await,
     }
+}
+
+fn resolve_bind(bind: Option<String>, port: Option<String>) -> Result<SocketAddr> {
+    if let Some(bind) = bind.filter(|value| !value.trim().is_empty()) {
+        return SocketAddr::from_str(&bind)
+            .with_context(|| format!("invalid bind address `{bind}`"));
+    }
+
+    let port = port
+        .filter(|value| !value.trim().is_empty())
+        .as_deref()
+        .unwrap_or("3838")
+        .parse::<u16>()
+        .context("invalid PORT")?;
+    Ok(SocketAddr::from(([0, 0, 0, 0], port)))
 }
 
 async fn serve(
