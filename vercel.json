@@ -3,5 +3,5 @@
   "buildCommand": "pnpm --filter @fishtank/viewer build",
   "installCommand": "pnpm install --frozen-lockfile --filter @fishtank/viewer...",
   "framework": "nextjs",
-  "outputDirectory": "apps/viewer/.next"
+  "outputDirectory": ".next"
 }
