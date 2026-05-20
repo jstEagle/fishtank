@@ -491,6 +491,10 @@ pub enum EventKind {
         character_id: CharacterId,
         home_id: LocationId,
     },
+    CharacterDeleted {
+        character_id: CharacterId,
+        name: String,
+    },
     CharacterMoved {
         character_id: CharacterId,
         from: LocationId,

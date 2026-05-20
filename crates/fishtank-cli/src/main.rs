@@ -16,6 +16,12 @@ struct Cli {
         default_value = "https://fishtank-edge.hunekejustus.workers.dev"
     )]
     url: String,
+    #[arg(
+        long,
+        env = "FISHTANK_CORE_URL",
+        default_value = "https://fishtank-production-0846.up.railway.app"
+    )]
+    core_url: String,
     #[arg(long, env = "FISHTANK_CHARACTER", default_value = "char_local")]
     character: String,
     #[command(subcommand)]
@@ -48,6 +54,10 @@ enum Commands {
     },
     Events(EventsArgs),
     Snapshot,
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -140,6 +150,25 @@ enum HomeCommands {
 enum NotificationCommands {
     List,
     Ack { notification_id: String },
+}
+
+#[derive(Subcommand)]
+enum AdminCommands {
+    Login {
+        #[arg(long)]
+        token: String,
+    },
+    Show,
+    Characters,
+    DeleteCharacter(DeleteCharacterArgs),
+}
+
+#[derive(Args)]
+struct DeleteCharacterArgs {
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
 }
 
 #[tokio::main]
@@ -434,6 +463,64 @@ async fn main() -> Result<()> {
                     .await?,
             )?;
         }
+        Commands::Admin { command } => match command {
+            AdminCommands::Login { token } => {
+                write_admin_token(&token).await?;
+                print_json(serde_json::json!({ "ok": true, "stored": admin_token_path()? }))?;
+            }
+            AdminCommands::Show => {
+                print_json(serde_json::json!({
+                    "configured": admin_token()?.is_some(),
+                    "source": if env::var("FISHTANK_ADMIN_TOKEN").is_ok() { "env" } else { "file" },
+                    "core_url": cli.core_url,
+                }))?;
+            }
+            AdminCommands::Characters => {
+                let token = require_admin_token()?;
+                print_json(
+                    admin_request(
+                        client.get(format!("{}/admin/characters", cli.core_url)),
+                        &token,
+                    )
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<serde_json::Value>()
+                    .await?,
+                )?;
+            }
+            AdminCommands::DeleteCharacter(args) => {
+                let character_id = match (args.id, args.name) {
+                    (Some(id), None) => id,
+                    (None, Some(name)) => {
+                        let token = require_admin_token()?;
+                        let list = admin_request(
+                            client.get(format!("{}/admin/characters", cli.core_url)),
+                            &token,
+                        )
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<serde_json::Value>()
+                        .await?;
+                        find_admin_character_id(&list, &name)?
+                    }
+                    _ => anyhow::bail!("provide exactly one of --id or --name"),
+                };
+                let token = require_admin_token()?;
+                print_json(
+                    admin_request(
+                        client.delete(format!("{}/admin/characters/{character_id}", cli.core_url)),
+                        &token,
+                    )
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<serde_json::Value>()
+                    .await?,
+                )?;
+            }
+        },
     }
     Ok(())
 }
@@ -519,6 +606,10 @@ fn agent_request(request: reqwest::RequestBuilder, token: &str) -> reqwest::Requ
     request.header("x-fishtank-agent-token", token)
 }
 
+fn admin_request(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    request.header("x-fishtank-admin-token", token)
+}
+
 fn agent_token() -> Result<Option<String>> {
     if let Ok(token) = env::var("FISHTANK_TOKEN")
         && !token.trim().is_empty()
@@ -545,6 +636,60 @@ async fn write_agent_token(token: &str) -> Result<()> {
 fn token_path() -> Result<PathBuf> {
     let home = env::var("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home).join(".fishtank").join("token"))
+}
+
+fn admin_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var("FISHTANK_ADMIN_TOKEN")
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(token));
+    }
+    let path = admin_token_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let token = std::fs::read_to_string(path)?.trim().to_string();
+    Ok((!token.is_empty()).then_some(token))
+}
+
+fn require_admin_token() -> Result<String> {
+    admin_token()?
+        .context("no Fishtank admin token configured; run `fishtank admin login --token <token>`")
+}
+
+async fn write_admin_token(token: &str) -> Result<()> {
+    let path = admin_token_path()?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, token).await?;
+    Ok(())
+}
+
+fn admin_token_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".fishtank").join("admin-token"))
+}
+
+fn find_admin_character_id(list: &serde_json::Value, name: &str) -> Result<String> {
+    let matches = list
+        .get("characters")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|character| character.get("name").and_then(|value| value.as_str()) == Some(name))
+        .filter_map(|character| {
+            character
+                .get("id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [id] => Ok(id.clone()),
+        [] => anyhow::bail!("no character named `{name}`"),
+        _ => anyhow::bail!("multiple characters named `{name}`; delete by --id"),
+    }
 }
 
 fn print_json(value: serde_json::Value) -> Result<()> {

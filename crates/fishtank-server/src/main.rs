@@ -9,16 +9,16 @@ use axum::{
         IntoResponse,
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use clap::{Parser, Subcommand};
 use fishtank_core::Engine;
 use fishtank_protocol::{
-    AuthenticatedCharacterRequest, Command, CommandEnvelope, Event, SCHEMA_VERSION, TokenCharacter,
-    WorldDefinition, WorldSnapshot,
+    AuthenticatedCharacterRequest, Character, Command, CommandEnvelope, Event, SCHEMA_VERSION,
+    TokenCharacter, WorldDefinition, WorldSnapshot,
 };
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     convert::Infallible,
@@ -55,6 +55,8 @@ enum Commands {
         database_url: Option<String>,
         #[arg(long, env = "FISHTANK_GATEWAY_SECRET")]
         gateway_secret: Option<String>,
+        #[arg(long, env = "FISHTANK_ADMIN_TOKEN")]
+        admin_token: Option<String>,
         #[arg(long, env = "FISHTANK_WORLD_ID", default_value = "village")]
         world_id: String,
     },
@@ -71,12 +73,27 @@ struct AppState {
     engine: Arc<Mutex<Engine>>,
     storage: Arc<dyn Storage>,
     gateway_secret: Option<String>,
+    admin_token: Option<String>,
     world_id: String,
 }
 
 #[derive(Deserialize)]
 struct EventsQuery {
     after: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct AdminCharacterList {
+    world_id: String,
+    tick: u64,
+    characters: Vec<Character>,
+}
+
+#[derive(Serialize)]
+struct AdminDeleteCharacterResponse {
+    ok: bool,
+    character: Character,
+    token_bindings_deleted: u64,
 }
 
 #[tokio::main]
@@ -97,10 +114,20 @@ async fn main() -> Result<()> {
             port,
             database_url,
             gateway_secret,
+            admin_token,
             world_id,
         } => {
             let bind = resolve_bind(bind, port)?;
-            serve(world, state, bind, database_url, gateway_secret, world_id).await
+            serve(
+                world,
+                state,
+                bind,
+                database_url,
+                gateway_secret,
+                admin_token,
+                world_id,
+            )
+            .await
         }
         Commands::Replay { world, commands } => replay(world, commands).await,
     }
@@ -127,6 +154,7 @@ async fn serve(
     bind: SocketAddr,
     database_url: Option<String>,
     gateway_secret: Option<String>,
+    admin_token: Option<String>,
     world_id: String,
 ) -> Result<()> {
     let storage: Arc<dyn Storage> = if let Some(database_url) = database_url {
@@ -146,6 +174,7 @@ async fn serve(
         engine: Arc::new(Mutex::new(engine)),
         storage,
         gateway_secret,
+        admin_token,
         world_id,
     };
     tokio::spawn(run_simulation_clock(app_state.clone()));
@@ -164,6 +193,11 @@ async fn serve(
         .route("/v1/command", post(v1_command))
         .route("/v1/events", get(v1_events_default))
         .route("/v1/notifications", get(v1_notifications))
+        .route("/admin/characters", get(admin_characters))
+        .route(
+            "/admin/characters/{character_id}",
+            delete(admin_delete_character),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
@@ -441,6 +475,49 @@ async fn v1_notifications(
     ))
 }
 
+async fn admin_characters(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AdminCharacterList>, AppError> {
+    authorize_admin(&state, &headers)?;
+    let snapshot = snapshot_from_state(&state);
+    Ok(Json(AdminCharacterList {
+        world_id: snapshot.world_id,
+        tick: snapshot.tick,
+        characters: snapshot.characters.into_values().collect(),
+    }))
+}
+
+async fn admin_delete_character(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(character_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    authorize_admin(&state, &headers)?;
+    let (character, snapshot, events, commands) = {
+        let mut engine = state.engine.lock().expect("engine lock poisoned");
+        let Some(character) = engine.delete_character(&character_id) else {
+            return Err(AppError::status(StatusCode::NOT_FOUND, "unknown character"));
+        };
+        (
+            character,
+            engine.state().clone(),
+            engine.events().to_vec(),
+            engine.command_log().to_vec(),
+        )
+    };
+    state.storage.save(&snapshot, &events, &commands).await?;
+    let token_bindings_deleted = state
+        .storage
+        .delete_tokens_for_character(&character.id)
+        .await?;
+    Ok(Json(AdminDeleteCharacterResponse {
+        ok: true,
+        character,
+        token_bindings_deleted,
+    }))
+}
+
 fn snapshot_from_state(state: &AppState) -> WorldSnapshot {
     state
         .engine
@@ -503,6 +580,27 @@ fn authorize_gateway(state: &AppState, headers: &HeaderMap) -> Result<(), AppErr
         Err(AppError::status(
             StatusCode::FORBIDDEN,
             "invalid gateway authorization",
+        ))
+    }
+}
+
+fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    let Some(admin_token) = &state.admin_token else {
+        return Err(AppError::status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "admin token is not configured",
+        ));
+    };
+    let provided = headers
+        .get("x-fishtank-admin-token")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty());
+    if provided == Some(admin_token.as_str()) {
+        Ok(())
+    } else {
+        Err(AppError::status(
+            StatusCode::UNAUTHORIZED,
+            "invalid admin token",
         ))
     }
 }

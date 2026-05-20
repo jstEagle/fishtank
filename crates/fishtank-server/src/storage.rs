@@ -25,6 +25,7 @@ pub trait Storage: Send + Sync {
     ) -> Result<()>;
     async fn character_for_token(&self, token_hash: &str) -> Result<Option<String>>;
     async fn bind_token(&self, token_hash: &str, character_id: &str) -> Result<()>;
+    async fn delete_tokens_for_character(&self, character_id: &str) -> Result<u64>;
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +88,18 @@ impl Storage for FileStorage {
         tokens.insert(token_hash.to_string(), character_id.to_string());
         fs::write(path, serde_json::to_string_pretty(&tokens)?).await?;
         Ok(())
+    }
+
+    async fn delete_tokens_for_character(&self, character_id: &str) -> Result<u64> {
+        let path = self.state_dir.join("tokens.json");
+        let mut tokens = read_json_map(&path).await?;
+        let before = tokens.len();
+        tokens.retain(|_, bound_character_id| bound_character_id != character_id);
+        fs::create_dir_all(&self.state_dir)
+            .await
+            .with_context(|| format!("failed to create {}", self.state_dir.display()))?;
+        fs::write(path, serde_json::to_string_pretty(&tokens)?).await?;
+        Ok((before - tokens.len()) as u64)
     }
 }
 #[derive(Clone)]
@@ -215,6 +228,14 @@ impl Storage for PgStorage {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn delete_tokens_for_character(&self, character_id: &str) -> Result<u64> {
+        let result = sqlx::query("delete from fishtank_agent_tokens where character_id = $1")
+            .bind(character_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
 

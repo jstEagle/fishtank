@@ -118,6 +118,30 @@ impl Engine {
             .collect()
     }
 
+    pub fn delete_character(&mut self, character_id: &str) -> Option<Character> {
+        let character = self.state.characters.remove(character_id)?;
+        for home in &mut self.state.world.homes {
+            if home.owner_character_id.as_deref() == Some(character_id) {
+                home.owner_character_id = None;
+            }
+        }
+        self.state.home_locks.remove(&character.home_id);
+        self.state.conversations.retain(|_, conversation| {
+            !conversation
+                .participant_ids
+                .iter()
+                .any(|id| id == character_id)
+        });
+        self.state
+            .notifications
+            .retain(|_, notification| notification.character_id != character_id);
+        self.record(EventKind::CharacterDeleted {
+            character_id: character.id.clone(),
+            name: character.name.clone(),
+        });
+        Some(character)
+    }
+
     pub fn apply(&mut self, envelope: CommandEnvelope) -> CommandResponse {
         let command_id = envelope.command_id.clone();
         let character_id = envelope.character_id.clone();
