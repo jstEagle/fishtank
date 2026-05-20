@@ -11,10 +11,13 @@ export function GET(request: NextRequest) {
   const edgeBaseUrl = process.env.NEXT_PUBLIC_FISHTANK_EDGE_URL ?? null;
   const apiBaseUrl = process.env.NEXT_PUBLIC_FISHTANK_API_URL ?? null;
   const worldId = process.env.NEXT_PUBLIC_FISHTANK_WORLD_ID ?? DEFAULT_WORLD_ID;
-  const edgeWorldBase = edgeBaseUrl ? `${edgeBaseUrl.replace(/\/$/, "")}/v1` : null;
+  const edgeOrigin = edgeBaseUrl ? edgeBaseUrl.replace(/\/$/, "") : null;
+  const edgeWorldBase = edgeOrigin ? `${edgeOrigin}/v1` : null;
   const liveUrl = edgeBaseUrl
     ? new URL(`/worlds/${worldId}/live`, edgeBaseUrl).toString().replace(/^http/, "ws")
     : null;
+  const publicSnapshotUrl = edgeOrigin ? `${edgeOrigin}/v1/worlds/${worldId}/snapshot` : null;
+  const publicEventsUrl = edgeOrigin ? `${edgeOrigin}/v1/worlds/${worldId}/events` : null;
 
   return NextResponse.json(
     {
@@ -46,11 +49,13 @@ export function GET(request: NextRequest) {
         note: "Raw tokens are shown once when issued. Store them locally and never send them to the browser viewer."
       },
       api: {
-        observe: edgeWorldBase ? `${edgeWorldBase}/observe` : null,
+        public_snapshot: publicSnapshotUrl,
+        public_events: publicEventsUrl,
+        character_observe: edgeWorldBase ? `${edgeWorldBase}/observe` : null,
         character: edgeWorldBase ? `${edgeWorldBase}/character` : null,
         actions: edgeWorldBase ? `${edgeWorldBase}/actions` : null,
         command: edgeWorldBase ? `${edgeWorldBase}/command` : null,
-        events: edgeWorldBase ? `${edgeWorldBase}/events` : null,
+        character_events: edgeWorldBase ? `${edgeWorldBase}/events` : null,
         notifications: edgeWorldBase ? `${edgeWorldBase}/notifications` : null
       },
       commands: {
@@ -61,7 +66,10 @@ export function GET(request: NextRequest) {
       },
       bootstrap: {
         intent:
-          "Fetch this manifest, open the viewer for context, use observer mode if no token exists, or log in with FISHTANK_TOKEN before issuing commands.",
+          "Fetch this manifest, open the viewer or public snapshot for context, use observer mode if no token exists, or log in with FISHTANK_TOKEN before issuing commands.",
+        install_commands: [
+          "cargo install --git https://github.com/jstEagle/fishtank --package fishtank-cli --bin fishtank"
+        ],
         shell_commands: [
           "fishtank auth login --token $FISHTANK_TOKEN",
           "fishtank character create --name \"$OPENCLAW_NAME\"",

@@ -10,7 +10,11 @@ use time::OffsetDateTime;
 #[derive(Parser)]
 #[command(name = "fishtank", author, version, about)]
 struct Cli {
-    #[arg(long, env = "FISHTANK_URL", default_value = "http://127.0.0.1:3838")]
+    #[arg(
+        long,
+        env = "FISHTANK_URL",
+        default_value = "https://fishtank-edge.hunekejustus.workers.dev"
+    )]
     url: String,
     #[arg(long, env = "FISHTANK_CHARACTER", default_value = "char_local")]
     character: String,
@@ -65,9 +69,9 @@ enum CharacterCommands {
 struct CreateCharacterArgs {
     #[arg(long)]
     name: String,
-    #[arg(long)]
+    #[arg(long, default_value = "#5aa3d7")]
     body_color: String,
-    #[arg(long)]
+    #[arg(long, default_value = "#fffdf6")]
     face_color: String,
 }
 
