@@ -3,14 +3,14 @@
 import { useEffect, useRef } from "react";
 import * as pc from "playcanvas";
 import type { Character, GroundType, WorldSnapshot } from "@/lib/protocol";
+import { characterVisualPositions } from "@/lib/character-visual-position";
 import {
   buildLocationLayout,
   buildServiceLayout,
   gridBounds,
   gridCellCenter,
   locationMap,
-  type LocationRenderNode,
-  type Vec3
+  type LocationRenderNode
 } from "@/lib/world-layout";
 
 const TICKS_PER_REAL_SECOND = 1;
@@ -172,7 +172,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     const currentCharacterRigs = characterRigs.current;
     const currentLocationRigs = locationRigs.current;
 
-    const ground = primitive("ground", "box", flat("#fcf2c4"), { x: 90, y: 0.2, z: 90 });
+    const ground = primitive("ground", "box", flat("#fffae0"), { x: 90, y: 0.2, z: 90 });
     setReceiveOnly(ground);
     ground.setPosition(0, -0.11, 0);
     app.root.addChild(ground);
@@ -219,12 +219,13 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       const nodes = buildLocationLayout(current);
       const byLocation = locationMap(nodes);
       const estimatedTick = estimatedViewerTick(tickClockRef.current, now);
+      const visualPositions = characterVisualPositions(current, byLocation, estimatedTick);
 
       // Update characters: position lerp + bob + scale highlight.
       for (const character of Object.values(current.characters)) {
         const rig = characterRigs.current.get(character.id);
         if (!rig) continue;
-        const position = characterPosition(character, current, byLocation, estimatedTick);
+        const position = visualPositions.get(character.id) ?? { x: 0, y: 0, z: 0 };
         const bob = Math.sin(now / 220 + rig.bobSeed) * 0.08;
         rig.entity.setPosition(position.x, position.y + 0.55 + bob, position.z);
 
@@ -489,9 +490,10 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     }
 
     // Characters.
+    const visualPositions = characterVisualPositions(snapshot, byLocation, snapshot.tick);
     for (const character of Object.values(snapshot.characters)) {
       const rig = buildCharacter(character);
-      const position = characterPosition(character, snapshot, byLocation, snapshot.tick);
+      const position = visualPositions.get(character.id) ?? { x: 0, y: 0, z: 0 };
       rig.entity.setPosition(position.x, position.y + 0.55, position.z);
       root.addChild(rig.entity);
       characterRigs.current.set(character.id, rig);
@@ -670,8 +672,8 @@ function buildWorldGrid(snapshot: WorldSnapshot) {
     }
   }
 
-  const lineMaterial = flat("#f1e8b4");
-  const majorMaterial = flat("#e2d597");
+  const lineMaterial = flat("#faf0c8");
+  const majorMaterial = flat("#f0e3b0");
   const lineWidth = 0.012;
   for (let x = 0; x <= bounds.width; x++) {
     const worldX = bounds.minX + x * bounds.cell;
@@ -712,14 +714,14 @@ function buildWorldGrid(snapshot: WorldSnapshot) {
 function groundColor(terrain: GroundType) {
   switch (terrain) {
     case "grass":
-      return "#e7f3d3";
+      return "#f1f8e1";
     case "path":
-      return "#fff8d8";
+      return "#fffce6";
     case "water":
-      return "#bfe4ee";
+      return "#d8eef3";
     case "ground":
     default:
-      return "#fdf5cf";
+      return "#fffbe8";
   }
 }
 
@@ -944,36 +946,6 @@ function statusColor(status: Character["status"]) {
   }
 }
 
-function characterPosition(
-  character: Character,
-  snapshot: WorldSnapshot,
-  byLocation: Map<string, LocationRenderNode>,
-  estimatedTick: number
-): Vec3 {
-  const from = byLocation.get(character.location_id)?.position ?? { x: 0, y: 0, z: 0 };
-  const activity = character.current_activity;
-
-  if (
-    activity &&
-    (activity.kind === "moving" || activity.kind === "returning_home") &&
-    activity.target_id
-  ) {
-    const to = byLocation.get(activity.target_id)?.position;
-    if (to) {
-      const duration = Math.max(1, activity.completes_at_tick - activity.started_at_tick);
-      const timelineTick = Math.min(
-        activity.completes_at_tick - 0.2,
-        Math.max(snapshot.tick, estimatedTick)
-      );
-      const progress = clamp((timelineTick - activity.started_at_tick) / duration, 0, 0.94);
-      const eased = easeInOut(progress);
-      return lerp(from, to, eased);
-    }
-  }
-
-  return from;
-}
-
 function estimatedViewerTick(clock: { tick: number; at: number }, now: number) {
   return clock.tick + ((now - clock.at) / 1000) * TICKS_PER_REAL_SECOND;
 }
@@ -993,18 +965,6 @@ function sceneSignature(snapshot: WorldSnapshot) {
     services: snapshot.world.services.map((service) => [service.id, service.location_id]),
     characters: characterIds
   });
-}
-
-function lerp(from: Vec3, to: Vec3, progress: number): Vec3 {
-  return {
-    x: from.x + (to.x - from.x) * progress,
-    y: from.y + (to.y - from.y) * progress,
-    z: from.z + (to.z - from.z) * progress
-  };
-}
-
-function easeInOut(t: number) {
-  return t * t * (3 - 2 * t);
 }
 
 function clamp(value: number, min: number, max: number) {

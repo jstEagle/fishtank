@@ -76,10 +76,10 @@ button {
 /*  Home — bento grid                                                  */
 /* ------------------------------------------------------------------ */
 :root {
-  --home-bg: #fdf3c2;
-  --home-bg-soft: #fef7d4;
+  --home-bg: #f6f6f4;
+  --home-bg-soft: #ffffff;
   --home-card: #ffffff;
-  --home-accent: #fff1a3;
+  --home-accent: #fff4b8;
   --home-accent-deep: #ffe87a;
   --home-line: rgba(17, 17, 15, 0.08);
   --home-ink: #11110f;
@@ -208,13 +208,28 @@ button {
   grid-column: span 6;
 }
 
+.bento-setup-card {
+  grid-column: span 3;
+}
+
+.bento-installer {
+  grid-column: span 6;
+}
+
+.bento-explainer {
+  grid-column: span 3;
+}
+
 @media (max-width: 980px) {
   .bento-intro,
   .bento-world,
   .bento-watch,
   .bento-core,
   .bento-arrival,
-  .bento-setup {
+  .bento-setup,
+  .bento-setup-card,
+  .bento-installer,
+  .bento-explainer {
     grid-column: span 6;
   }
   .bento-world {
@@ -496,7 +511,7 @@ button {
 .bento-watch {
   position: relative;
   background:
-    radial-gradient(120% 80% at 0% 0%, #fff5b0 0%, transparent 60%),
+    radial-gradient(120% 80% at 0% 0%, #fffbd8 0%, transparent 60%),
     var(--home-accent);
 }
 
@@ -761,6 +776,174 @@ button {
     grid-column: 1;
     grid-row: auto;
   }
+}
+
+/* Installer card */
+.installer-art {
+  border-radius: 14px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(17, 17, 15, 0.08);
+}
+
+.installer-window {
+  position: relative;
+  display: block;
+  height: 78px;
+  border-radius: 10px;
+  background: #14130f;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.installer-dot {
+  position: absolute;
+  top: 10px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3b3a36;
+}
+
+.installer-dot:nth-child(1) {
+  left: 12px;
+}
+.installer-dot:nth-child(2) {
+  left: 26px;
+}
+.installer-dot:nth-child(3) {
+  left: 40px;
+}
+
+.installer-line {
+  display: block;
+  height: 6px;
+  border-radius: 4px;
+  background: #2c2a25;
+  margin-top: 8px;
+  transition: width 320ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 320ms ease;
+}
+
+.installer-line-a {
+  margin-top: 18px;
+  width: 78%;
+  background: #5a5648;
+}
+.installer-line-b {
+  width: 56%;
+}
+.installer-line-c {
+  width: 38%;
+}
+
+.bento-installer:hover .installer-line-a {
+  width: 92%;
+  background: var(--home-accent-deep);
+}
+.bento-installer:hover .installer-line-b {
+  width: 74%;
+}
+.bento-installer:hover .installer-line-c {
+  width: 50%;
+}
+
+/* Explainer rows (manifest contents) */
+.explainer-art {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 14px;
+  background: #faf7ec;
+  border: 1px solid var(--home-line);
+}
+
+.explainer-row {
+  position: relative;
+  display: block;
+  padding-left: 18px;
+  height: 18px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--home-ink-soft);
+  transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1), color 200ms ease;
+}
+
+.explainer-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--home-ink-faint);
+}
+
+.explainer-row::after {
+  content: attr(data-text);
+  position: absolute;
+  left: 18px;
+  top: 1px;
+}
+
+.bento-explainer:hover .explainer-row {
+  color: var(--home-ink);
+}
+.bento-explainer:hover .explainer-row:nth-child(odd) {
+  transform: translateX(4px);
+}
+.bento-explainer:hover .explainer-row:nth-child(even) {
+  transform: translateX(-3px);
+}
+
+/* Mode cards */
+.modes-art {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px;
+  border-radius: 12px;
+  background: #faf7ec;
+  border: 1px solid var(--home-line);
+  transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.bento-explainer:hover .mode-card:first-child {
+  transform: translateY(-3px);
+}
+.bento-explainer:hover .mode-card:last-child {
+  transform: translateY(-3px) translateX(3px);
+}
+
+.mode-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--good);
+}
+
+.mode-dot.blue {
+  background: #4a8aae;
+}
+
+.mode-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--home-ink);
+}
+
+.mode-need {
+  font-size: 11px;
+  color: var(--home-ink-faint);
+  font-family: var(--font-mono);
 }
 
 /* Footer */
