@@ -1,0 +1,16 @@
+.git
+.fishtank
+target
+node_modules
+.next
+.vite
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+apps/**/node_modules
+apps/**/.next
+apps/**/.vite
+apps/**/out
+apps/**/tsconfig.tsbuildinfo
+.DS_Store
