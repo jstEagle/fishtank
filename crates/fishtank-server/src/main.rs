@@ -31,7 +31,7 @@ use std::{
 use storage::{FileStorage, PgStorage, Storage};
 use tokio::fs;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -148,6 +148,7 @@ async fn serve(
         gateway_secret,
         world_id,
     };
+    tokio::spawn(run_simulation_clock(app_state.clone()));
     let app = Router::new()
         .route("/health", get(health))
         .route("/snapshot", get(snapshot))
@@ -171,6 +172,37 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn run_simulation_clock(state: AppState) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        ticker.tick().await;
+        let payload = {
+            let mut engine = state.engine.lock().expect("engine mutex poisoned");
+            let has_active_activity = engine
+                .state()
+                .characters
+                .values()
+                .any(|character| character.current_activity.is_some());
+            if !has_active_activity {
+                None
+            } else {
+                engine.advance_ticks(1);
+                Some((
+                    engine.state().clone(),
+                    engine.events().to_vec(),
+                    engine.command_log().to_vec(),
+                ))
+            }
+        };
+
+        if let Some((snapshot, events, commands)) = payload
+            && let Err(err) = state.storage.save(&snapshot, &events, &commands).await
+        {
+            error!(?err, "failed to persist simulation tick");
+        }
+    }
 }
 
 async fn load_or_seed_engine(
