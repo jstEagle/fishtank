@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "fishtank-server serve --bind 0.0.0.0:$PORT --world worlds/village.json --state /data/fishtank",
+    "startCommand": "fishtank-server serve",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
