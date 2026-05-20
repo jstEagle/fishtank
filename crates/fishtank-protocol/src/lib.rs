@@ -23,6 +23,7 @@ pub struct WorldDefinition {
     pub id: String,
     pub name: String,
     pub seed: u64,
+    pub grid: WorldGrid,
     pub starting_coins: u32,
     pub allowance_coins: u32,
     pub max_coins: u32,
@@ -33,10 +34,56 @@ pub struct WorldDefinition {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct WorldGrid {
+    pub width: u32,
+    pub height: u32,
+    #[serde(default = "default_cell_size")]
+    pub cell_size: u32,
+    pub terrain: Vec<Vec<GroundType>>,
+}
+
+fn default_cell_size() -> u32 {
+    1
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroundType {
+    Ground,
+    Grass,
+    Path,
+    Water,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FacingDirection {
+    North,
+    South,
+    East,
+    West,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct GridPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct GridSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct LocationDefinition {
     pub id: LocationId,
     pub name: String,
     pub description: String,
+    pub grid_position: GridPosition,
+    pub grid_size: GridSize,
+    pub facing: FacingDirection,
     pub exits: Vec<LocationId>,
     #[serde(default)]
     pub directional_exits: BTreeMap<Direction, LocationId>,
@@ -104,6 +151,8 @@ pub struct Activity {
     pub kind: ActivityKind,
     pub status: ActivityStatus,
     pub target_id: Option<EntityId>,
+    #[serde(default)]
+    pub movement_path: Vec<GridPosition>,
     pub started_at_tick: Tick,
     pub completes_at_tick: Tick,
     pub description: String,
@@ -291,6 +340,10 @@ pub enum CommandResult {
         activity_id: String,
         description: String,
         estimated_ticks: Tick,
+        started_at_tick: Tick,
+        completes_at_tick: Tick,
+        #[serde(default)]
+        movement_path: Vec<GridPosition>,
         promise: Option<Promise>,
     },
     MessageSpoken {
@@ -453,7 +506,17 @@ pub enum EventKind {
         character_id: CharacterId,
         activity_id: String,
         description: String,
+        started_at_tick: Tick,
         completes_at_tick: Tick,
+        #[serde(default)]
+        movement_path: Vec<GridPosition>,
+    },
+    WorldExpanded {
+        world_id: String,
+        block_id: String,
+        homes_added: usize,
+        services_added: usize,
+        parks_added: usize,
     },
     ActivityCompleted {
         character_id: CharacterId,
@@ -531,4 +594,26 @@ pub struct Notification {
     pub summary: String,
     pub acknowledged: bool,
     pub related: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct TokenCharacter {
+    pub token_id: String,
+    pub character_id: CharacterId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AuthenticatedCharacterRequest {
+    pub name: String,
+    pub body_color: String,
+    pub face_color: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct LiveEnvelope {
+    pub kind: String,
+    pub world_id: String,
+    pub snapshot: Option<WorldSnapshot>,
+    #[serde(default)]
+    pub events: Vec<Event>,
 }

@@ -66,6 +66,8 @@ The core should use a mixed tile and POI model. The authoritative world is grid-
 
 Agents should not be forced to think in coordinates. Early versions can combine tile positions, semantic POIs, zones, simple nav graphs, and directional movement. Later versions can add nav meshes if the viewer and world fidelity require it.
 
+The first implemented grid contract is intentionally simple: the world defines a rectangular grid, every tile has a ground type, each location owns a rectangular tile footprint, and the core rejects worlds with incomplete terrain, out-of-bounds footprints, or overlapping location footprints. The viewer renders that grid directly while still animating characters between semantic locations.
+
 ## Perception Layers
 
 The world should not dump every object into every observation. Agents should see a curated local view:

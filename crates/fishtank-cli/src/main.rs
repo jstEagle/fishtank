@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use fishtank_protocol::{
-    Command, CommandEnvelope, Direction, HomeAction, MoveMode, NotificationAction, SCHEMA_VERSION,
-    SpeechTarget,
+    AuthenticatedCharacterRequest, Command, CommandEnvelope, Direction, HomeAction, MoveMode,
+    NotificationAction, SCHEMA_VERSION, SpeechTarget,
 };
+use std::{env, path::PathBuf};
 use time::OffsetDateTime;
 
 #[derive(Parser)]
@@ -19,6 +20,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
     Character {
         #[command(subcommand)]
         command: CharacterCommands,
@@ -39,6 +44,15 @@ enum Commands {
     },
     Events(EventsArgs),
     Snapshot,
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    Login {
+        #[arg(long)]
+        token: String,
+    },
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -128,54 +142,81 @@ enum NotificationCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = reqwest::Client::new();
+    let token = agent_token()?;
 
     match cli.command {
+        Commands::Auth { command } => match command {
+            AuthCommands::Login { token } => {
+                write_agent_token(&token).await?;
+                print_json(serde_json::json!({ "ok": true, "stored": token_path()? }))?;
+            }
+            AuthCommands::Show => {
+                print_json(serde_json::json!({
+                    "configured": token.is_some(),
+                    "source": if env::var("FISHTANK_TOKEN").is_ok() { "env" } else { "file" }
+                }))?;
+            }
+        },
         Commands::Character { command } => match command {
             CharacterCommands::Create(args) => {
-                send_command(
-                    &client,
-                    &cli.url,
-                    &cli.character,
-                    Command::CreateCharacter {
-                        name: args.name,
-                        body_color: args.body_color,
-                        face_color: args.face_color,
-                    },
-                )
-                .await?;
+                if let Some(token) = token.as_deref() {
+                    let response = agent_request(
+                        client.post(format!("{}/v1/character", cli.url)).json(
+                            &AuthenticatedCharacterRequest {
+                                name: args.name,
+                                body_color: args.body_color,
+                                face_color: args.face_color,
+                            },
+                        ),
+                        token,
+                    )
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<serde_json::Value>()
+                    .await?;
+                    print_json(response)?;
+                } else {
+                    send_command(
+                        &client,
+                        &cli.url,
+                        &cli.character,
+                        None,
+                        Command::CreateCharacter {
+                            name: args.name,
+                            body_color: args.body_color,
+                            face_color: args.face_color,
+                        },
+                    )
+                    .await?;
+                }
             }
             CharacterCommands::Show => {
                 print_json(
-                    client
-                        .get(format!("{}/characters/{}/observe", cli.url, cli.character))
+                    get_observation(&client, &cli.url, &cli.character, token.as_deref()).await?,
+                )?;
+            }
+        },
+        Commands::Observe => {
+            print_json(
+                get_observation(&client, &cli.url, &cli.character, token.as_deref()).await?,
+            )?;
+        }
+        Commands::Actions => {
+            if let Some(token) = token.as_deref() {
+                print_json(
+                    agent_request(client.get(format!("{}/v1/actions", cli.url)), token)
                         .send()
                         .await?
                         .error_for_status()?
                         .json::<serde_json::Value>()
                         .await?,
                 )?;
+            } else {
+                let observation =
+                    get_observation(&client, &cli.url, &cli.character, token.as_deref()).await?;
+                print_json(observation["available_actions"].clone())?;
             }
-        },
-        Commands::Observe => {
-            print_json(
-                client
-                    .get(format!("{}/characters/{}/observe", cli.url, cli.character))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<serde_json::Value>()
-                    .await?,
-            )?;
-        }
-        Commands::Actions => {
-            let observation = client
-                .get(format!("{}/characters/{}/observe", cli.url, cli.character))
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await?;
-            print_json(observation["available_actions"].clone())?;
         }
         Commands::Move(args) => {
             let mode = match (args.to, args.direction) {
@@ -186,7 +227,14 @@ async fn main() -> Result<()> {
                 },
                 _ => anyhow::bail!("provide exactly one of --to or --direction"),
             };
-            send_command(&client, &cli.url, &cli.character, Command::Move { mode }).await?;
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::Move { mode },
+            )
+            .await?;
         }
         Commands::Say(args) => {
             let target = args
@@ -197,6 +245,7 @@ async fn main() -> Result<()> {
                 &client,
                 &cli.url,
                 &cli.character,
+                token.as_deref(),
                 Command::Say {
                     target,
                     text: args.text,
@@ -212,6 +261,7 @@ async fn main() -> Result<()> {
                 &client,
                 &cli.url,
                 &cli.character,
+                token.as_deref(),
                 Command::Order {
                     service_id: args.target,
                     item: args.item.unwrap_or_else(|| "coffee".to_string()),
@@ -224,19 +274,28 @@ async fn main() -> Result<()> {
                 &client,
                 &cli.url,
                 &cli.character,
+                token.as_deref(),
                 Command::Wait { ticks: args.ticks },
             )
             .await?;
         }
         Commands::Home { command } => match command {
             HomeCommands::Manual => {
-                send_command(&client, &cli.url, &cli.character, Command::HomeManual).await?;
+                send_command(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    Command::HomeManual,
+                )
+                .await?;
             }
             HomeCommands::Enter => {
                 send_command(
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Home {
                         action: HomeAction::Enter,
                     },
@@ -248,6 +307,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Home {
                         action: HomeAction::Leave,
                     },
@@ -259,6 +319,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Home {
                         action: HomeAction::Lock,
                     },
@@ -270,6 +331,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Home {
                         action: HomeAction::Unlock,
                     },
@@ -281,6 +343,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Home {
                         action: HomeAction::ReturnHome,
                     },
@@ -294,6 +357,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Notifications {
                         action: NotificationAction::List,
                     },
@@ -305,6 +369,7 @@ async fn main() -> Result<()> {
                     &client,
                     &cli.url,
                     &cli.character,
+                    token.as_deref(),
                     Command::Notifications {
                         action: NotificationAction::Ack { notification_id },
                     },
@@ -313,7 +378,11 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Events(args) => {
-            let mut request = client.get(format!("{}/events", cli.url));
+            let mut request = if let Some(token) = token.as_deref() {
+                agent_request(client.get(format!("{}/v1/events", cli.url)), token)
+            } else {
+                client.get(format!("{}/events", cli.url))
+            };
             if let Some(after) = args.after {
                 request = request.query(&[("after", after)]);
             }
@@ -327,9 +396,16 @@ async fn main() -> Result<()> {
             )?;
         }
         Commands::Snapshot => {
+            let request = if let Some(token) = token.as_deref() {
+                agent_request(
+                    client.get(format!("{}/v1/worlds/village/snapshot", cli.url)),
+                    token,
+                )
+            } else {
+                client.get(format!("{}/snapshot", cli.url))
+            };
             print_json(
-                client
-                    .get(format!("{}/snapshot", cli.url))
+                request
                     .send()
                     .await?
                     .error_for_status()?
@@ -345,8 +421,24 @@ async fn send_command(
     client: &reqwest::Client,
     url: &str,
     character_id: &str,
+    token: Option<&str>,
     command: Command,
 ) -> Result<()> {
+    if let Some(token) = token {
+        let response = agent_request(
+            client.post(format!("{url}/v1/command")).json(&command),
+            token,
+        )
+        .send()
+        .await
+        .context("failed to send command")?
+        .error_for_status()
+        .context("server rejected command request")?
+        .json::<serde_json::Value>()
+        .await
+        .context("failed to parse command response")?;
+        return print_json(response);
+    }
     let envelope = CommandEnvelope {
         schema_version: SCHEMA_VERSION.to_string(),
         command_id: format!("cmd.{}", OffsetDateTime::now_utc().unix_timestamp_nanos()),
@@ -370,6 +462,57 @@ async fn send_command(
         .await
         .context("failed to parse command response")?;
     print_json(response)
+}
+
+async fn get_observation(
+    client: &reqwest::Client,
+    url: &str,
+    character_id: &str,
+    token: Option<&str>,
+) -> Result<serde_json::Value> {
+    let request = if let Some(token) = token {
+        agent_request(client.get(format!("{url}/v1/observe")), token)
+    } else {
+        client.get(format!("{url}/characters/{character_id}/observe"))
+    };
+    Ok(request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?)
+}
+
+fn agent_request(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    request.header("x-fishtank-agent-token", token)
+}
+
+fn agent_token() -> Result<Option<String>> {
+    if let Ok(token) = env::var("FISHTANK_TOKEN")
+        && !token.trim().is_empty()
+    {
+        return Ok(Some(token));
+    }
+    let path = token_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let token = std::fs::read_to_string(path)?.trim().to_string();
+    Ok((!token.is_empty()).then_some(token))
+}
+
+async fn write_agent_token(token: &str) -> Result<()> {
+    let path = token_path()?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, token).await?;
+    Ok(())
+}
+
+fn token_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".fishtank").join("token"))
 }
 
 fn print_json(value: serde_json::Value) -> Result<()> {

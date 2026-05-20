@@ -1,2 +1,8 @@
 /target/
 /.fishtank/
+node_modules/
+*.tsbuildinfo
+.vite/
+/.next/
+/apps/viewer/.next/
+/apps/viewer/out/

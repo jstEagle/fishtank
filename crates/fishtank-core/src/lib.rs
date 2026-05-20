@@ -1,11 +1,12 @@
 use fishtank_protocol::{
     ActionView, Activity, ActivityKind, ActivityStatus, ApiError, Character, CharacterId,
     CharacterStatus, Command, CommandEnvelope, CommandResponse, CommandResult, Conversation,
-    ConversationId, Direction, EntityId, EntityView, Event, EventId, EventKind, HomeAction,
-    HomeManual, LocationDefinition, LocationId, LocationView, MoveMode, Notification,
-    NotificationAction, OFFLINE_RETURN_HOME_TICKS, Observation, PreconditionKind, Promise,
-    QueueableCommand, QueuedCommand, SCHEMA_VERSION, ServiceDefinition, SpeechMessage,
-    SpeechTarget, TICKS_PER_INGAME_DAY, Tick, WorldDefinition, WorldSnapshot, WorldTime,
+    ConversationId, Direction, EntityId, EntityView, Event, EventId, EventKind, FacingDirection,
+    GridPosition, GridSize, GroundType, HomeAction, HomeManual, LocationDefinition, LocationId,
+    LocationView, MoveMode, Notification, NotificationAction, OFFLINE_RETURN_HOME_TICKS,
+    Observation, PreconditionKind, Promise, QueueableCommand, QueuedCommand, SCHEMA_VERSION,
+    ServiceDefinition, SpeechMessage, SpeechTarget, TICKS_PER_INGAME_DAY, Tick, WorldDefinition,
+    WorldSnapshot, WorldTime,
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -13,6 +14,7 @@ use thiserror::Error;
 pub const DEFAULT_OBSERVATION_TTL_TICKS: Tick = 20;
 pub const DEFAULT_NOTIFICATION_TTL_TICKS: Tick = 3_600;
 pub const MOVE_BASE_TICKS: Tick = 3;
+pub const MOVE_TICKS_PER_TILE: Tick = 2;
 pub const MAX_QUEUE_LEN: usize = 3;
 
 #[derive(Debug, Error)]
@@ -29,6 +31,14 @@ pub enum CoreError {
     MissingHome(LocationId),
     #[error("service {0} references missing location {1}")]
     MissingServiceLocation(EntityId, LocationId),
+    #[error("world grid must be at least 1x1")]
+    InvalidGrid,
+    #[error("world grid terrain must define exactly one ground type per tile")]
+    InvalidTerrain,
+    #[error("location {0} has an invalid grid footprint")]
+    InvalidLocationFootprint(LocationId),
+    #[error("location {0} overlaps location {1} on the world grid")]
+    OverlappingLocation(LocationId, LocationId),
 }
 
 #[derive(Clone, Debug)]
@@ -324,6 +334,7 @@ impl Engine {
         validate_hex_color(&body_color, "body_color")?;
         validate_hex_color(&face_color, "face_color")?;
 
+        self.ensure_growth_capacity();
         let home_id = self.allocate_home(&character_id);
         let location_id = home_id
             .clone()
@@ -349,6 +360,7 @@ impl Engine {
             character_id,
             home_id: character.home_id.clone(),
         });
+        self.ensure_growth_capacity();
         Ok(character)
     }
 
@@ -381,10 +393,12 @@ impl Engine {
         self.ensure_can_start_activity(character_id, false)?;
         self.ensure_home_access(character_id, &target_location_id)?;
         let from = self.require_character(character_id)?.location_id.clone();
+        let movement_path = self.movement_path(&from, &target_location_id)?;
+        let estimated_ticks = self.movement_ticks(&movement_path);
         let activity_id = self.next_activity_id("move");
         let description = format!("{character_id} walks from {from} to {target_location_id}.");
-        let completes_at_tick = self.state.tick + MOVE_BASE_TICKS;
         let started_at_tick = self.state.tick;
+        let completes_at_tick = started_at_tick + estimated_ticks;
         {
             let actor = self.require_character_mut(character_id)?;
             actor.current_activity = Some(Activity {
@@ -392,6 +406,7 @@ impl Engine {
                 kind: ActivityKind::Moving,
                 status: ActivityStatus::Active,
                 target_id: Some(target_location_id),
+                movement_path: movement_path.clone(),
                 started_at_tick,
                 completes_at_tick,
                 description: description.clone(),
@@ -404,12 +419,17 @@ impl Engine {
             character_id: character_id.to_string(),
             activity_id: activity_id.clone(),
             description: description.clone(),
+            started_at_tick,
             completes_at_tick,
+            movement_path: movement_path.clone(),
         });
         Ok(CommandResult::ActivityStarted {
             activity_id,
             description,
-            estimated_ticks: MOVE_BASE_TICKS,
+            estimated_ticks,
+            started_at_tick,
+            completes_at_tick,
+            movement_path,
             promise: None,
         })
     }
@@ -521,6 +541,7 @@ impl Engine {
                 kind: ActivityKind::Ordering,
                 status: ActivityStatus::Active,
                 target_id: Some(service.id.clone()),
+                movement_path: Vec::new(),
                 started_at_tick,
                 completes_at_tick,
                 description: description.clone(),
@@ -540,7 +561,9 @@ impl Engine {
             character_id: character_id.to_string(),
             activity_id: activity_id.clone(),
             description: description.clone(),
+            started_at_tick,
             completes_at_tick,
+            movement_path: Vec::new(),
         });
         self.record(EventKind::PromiseCreated {
             promise: promise.clone(),
@@ -549,6 +572,9 @@ impl Engine {
             activity_id,
             description,
             estimated_ticks: service.duration_ticks,
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
             promise: Some(promise),
         })
     }
@@ -906,6 +932,7 @@ impl Engine {
             kind: ActivityKind::Waiting,
             status: ActivityStatus::Active,
             target_id: None,
+            movement_path: Vec::new(),
             started_at_tick,
             completes_at_tick,
             description: description.clone(),
@@ -917,12 +944,17 @@ impl Engine {
             character_id: character_id.to_string(),
             activity_id: activity_id.clone(),
             description: description.clone(),
+            started_at_tick,
             completes_at_tick,
+            movement_path: Vec::new(),
         });
         Ok(CommandResult::ActivityStarted {
             activity_id,
             description,
             estimated_ticks: ticks,
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
             promise: None,
         })
     }
@@ -1227,6 +1259,273 @@ impl Engine {
             .collect()
     }
 
+    pub fn ensure_growth_capacity(&mut self) {
+        let free_homes = self.available_home_count();
+        let cafe_capacity = self
+            .state
+            .world
+            .services
+            .iter()
+            .filter(|service| service.item == "coffee")
+            .map(|service| service.capacity)
+            .sum::<u32>()
+            .max(1);
+        let cafe_load = self.state.characters.len() as f32 / cafe_capacity as f32;
+        if free_homes < 3 || cafe_load >= 0.75 {
+            self.expand_world(cafe_load >= 0.75);
+        }
+    }
+
+    fn available_home_count(&self) -> usize {
+        let occupied_home_ids = self
+            .state
+            .characters
+            .values()
+            .map(|character| character.home_id.clone())
+            .collect::<Vec<_>>();
+        self.state
+            .world
+            .homes
+            .iter()
+            .filter(|home| {
+                home.owner_character_id.is_none()
+                    && !occupied_home_ids.iter().any(|home_id| home_id == &home.id)
+            })
+            .count()
+    }
+
+    fn expand_world(&mut self, force_cafe: bool) {
+        let block_index = self
+            .state
+            .world
+            .locations
+            .iter()
+            .filter(|location| location.id.contains(".block_"))
+            .count()
+            + 1;
+        let block_id = format!("block_{block_index}");
+        let start_x = self.state.world.grid.width as i32;
+        let height = self.state.world.grid.height.max(12);
+        let street_y = (height / 2) as i32;
+        let block_width = 8_u32;
+
+        if height > self.state.world.grid.height {
+            let existing_width = self.state.world.grid.width as usize;
+            for _ in self.state.world.grid.height..height {
+                self.state
+                    .world
+                    .grid
+                    .terrain
+                    .push(vec![GroundType::Ground; existing_width]);
+            }
+            self.state.world.grid.height = height;
+        }
+
+        for (y, row) in self.state.world.grid.terrain.iter_mut().enumerate() {
+            let ground = if y as i32 == street_y {
+                GroundType::Path
+            } else if y >= height as usize - 3 {
+                GroundType::Grass
+            } else {
+                GroundType::Ground
+            };
+            row.extend(std::iter::repeat_n(ground, block_width as usize));
+        }
+        self.state.world.grid.width += block_width;
+
+        let street_id = format!("village.{block_id}.street");
+        let previous_street = self
+            .state
+            .world
+            .locations
+            .iter()
+            .filter(|location| location.id.contains("street"))
+            .max_by_key(|location| location.grid_position.x)
+            .map(|location| location.id.clone())
+            .unwrap_or_else(|| self.state.world.spawn_location_id.clone());
+
+        self.add_exit(&previous_street, &street_id, Some(Direction::East));
+        let mut street_exits = vec![previous_street.clone()];
+        let mut street_directions = BTreeMap::from([(Direction::West, previous_street)]);
+
+        let home_count = 3 + ((self.state.world.seed + block_index as u64) % 4) as usize;
+        let mut homes_added = 0;
+        for index in 0..home_count {
+            let home_id = format!("village.{block_id}.home_{}", index + 1);
+            let y = if index % 2 == 0 {
+                street_y - 2
+            } else {
+                street_y + 2
+            };
+            let x = start_x + 1 + (index as i32 % 6);
+            self.state.world.locations.push(LocationDefinition {
+                id: home_id.clone(),
+                name: format!("{} Home {}", human_block_name(block_index), index + 1),
+                description: "A compact robot home on the expanding edge of the village."
+                    .to_string(),
+                grid_position: GridPosition { x, y },
+                grid_size: GridSize {
+                    width: 1,
+                    height: 1,
+                },
+                facing: if y < street_y {
+                    FacingDirection::South
+                } else {
+                    FacingDirection::North
+                },
+                exits: vec![street_id.clone()],
+                directional_exits: BTreeMap::from([(Direction::Forward, street_id.clone())]),
+                poi_ids: Vec::new(),
+                private_home: true,
+            });
+            self.state
+                .world
+                .homes
+                .push(fishtank_protocol::HomeDefinition {
+                    id: home_id.clone(),
+                    name: format!("{} Home {}", human_block_name(block_index), index + 1),
+                    owner_character_id: None,
+                });
+            street_exits.push(home_id);
+            homes_added += 1;
+        }
+
+        let mut parks_added = 0;
+        if block_index % 2 == 0 {
+            let park_id = format!("village.{block_id}.park");
+            self.state.world.locations.push(LocationDefinition {
+                id: park_id.clone(),
+                name: format!("{} Park", human_block_name(block_index)),
+                description: "A small green pocket with benches and a clear view of the street."
+                    .to_string(),
+                grid_position: GridPosition {
+                    x: start_x + 4,
+                    y: height as i32 - 3,
+                },
+                grid_size: GridSize {
+                    width: 3,
+                    height: 2,
+                },
+                facing: FacingDirection::North,
+                exits: vec![street_id.clone()],
+                directional_exits: BTreeMap::from([(Direction::North, street_id.clone())]),
+                poi_ids: Vec::new(),
+                private_home: false,
+            });
+            street_directions.insert(Direction::South, park_id.clone());
+            street_exits.push(park_id);
+            parks_added = 1;
+        }
+
+        let mut services_added = 0;
+        if force_cafe || block_index % 4 == 0 {
+            let cafe_id = format!("village.{block_id}.cafe");
+            let service_id = format!("{cafe_id}.service_window");
+            self.state.world.locations.push(LocationDefinition {
+                id: cafe_id.clone(),
+                name: format!("{} Coffee", human_block_name(block_index)),
+                description: "A deterministic service-window cafe for coffee and short queues."
+                    .to_string(),
+                grid_position: GridPosition {
+                    x: start_x + 2,
+                    y: street_y - 3,
+                },
+                grid_size: GridSize {
+                    width: 2,
+                    height: 1,
+                },
+                facing: FacingDirection::South,
+                exits: vec![street_id.clone()],
+                directional_exits: BTreeMap::from([(Direction::South, street_id.clone())]),
+                poi_ids: vec![service_id.clone()],
+                private_home: false,
+            });
+            self.state.world.services.push(ServiceDefinition {
+                id: service_id,
+                name: format!("{} Service Window", human_block_name(block_index)),
+                location_id: cafe_id.clone(),
+                item: "coffee".to_string(),
+                price_coins: 2,
+                duration_ticks: 30,
+                capacity: 8,
+                overflow_behavior: "queue_nearby".to_string(),
+            });
+            street_directions.insert(Direction::North, cafe_id.clone());
+            street_exits.push(cafe_id);
+            services_added = 1;
+        }
+
+        street_directions.insert(Direction::Forward, street_exits[0].clone());
+        self.state.world.locations.push(LocationDefinition {
+            id: street_id,
+            name: format!("{} Street", human_block_name(block_index)),
+            description: "A newly paved street segment grown from village demand.".to_string(),
+            grid_position: GridPosition {
+                x: start_x,
+                y: street_y,
+            },
+            grid_size: GridSize {
+                width: block_width,
+                height: 1,
+            },
+            facing: FacingDirection::East,
+            exits: street_exits,
+            directional_exits: street_directions,
+            poi_ids: Vec::new(),
+            private_home: false,
+        });
+
+        self.record(EventKind::WorldExpanded {
+            world_id: self.state.world_id.clone(),
+            block_id,
+            homes_added,
+            services_added,
+            parks_added,
+        });
+    }
+
+    fn add_exit(&mut self, location_id: &str, exit: &str, direction: Option<Direction>) {
+        if let Some(location) = self
+            .state
+            .world
+            .locations
+            .iter_mut()
+            .find(|location| location.id == location_id)
+        {
+            if !location.exits.iter().any(|candidate| candidate == exit) {
+                location.exits.push(exit.to_string());
+            }
+            if let Some(direction) = direction {
+                location
+                    .directional_exits
+                    .insert(direction, exit.to_string());
+            }
+        }
+    }
+
+    fn movement_path(&self, from: &str, to: &str) -> Result<Vec<GridPosition>, ApiError> {
+        let from_location = self
+            .location(from)
+            .ok_or_else(|| api_error("location_missing", "The source location is missing."))?;
+        let to_location = self
+            .location(to)
+            .ok_or_else(|| api_error("location_missing", "The target location is missing."))?;
+        Ok(vec![
+            location_center(from_location),
+            location_center(to_location),
+        ])
+    }
+
+    fn movement_ticks(&self, path: &[GridPosition]) -> Tick {
+        let distance = path
+            .windows(2)
+            .map(|pair| {
+                pair[0].x.abs_diff(pair[1].x) as Tick + pair[0].y.abs_diff(pair[1].y) as Tick
+            })
+            .sum::<Tick>();
+        MOVE_BASE_TICKS.max(distance.saturating_mul(MOVE_TICKS_PER_TILE))
+    }
+
     fn create_notification<const N: usize>(
         &mut self,
         character_id: &str,
@@ -1401,6 +1700,18 @@ fn validate_world(world: &WorldDefinition) -> Result<(), CoreError> {
     if world.locations.is_empty() {
         return Err(CoreError::EmptyWorld);
     }
+    if world.grid.width == 0 || world.grid.height == 0 || world.grid.cell_size == 0 {
+        return Err(CoreError::InvalidGrid);
+    }
+    if world.grid.terrain.len() != world.grid.height as usize
+        || world
+            .grid
+            .terrain
+            .iter()
+            .any(|row| row.len() != world.grid.width as usize)
+    {
+        return Err(CoreError::InvalidTerrain);
+    }
     if !world
         .locations
         .iter()
@@ -1416,6 +1727,33 @@ fn validate_world(world: &WorldDefinition) -> Result<(), CoreError> {
                 .any(|candidate| candidate.id == *exit)
             {
                 return Err(CoreError::MissingExit(location.id.clone(), exit.clone()));
+            }
+        }
+    }
+    let mut occupied = BTreeMap::<(i32, i32), LocationId>::new();
+    for location in &world.locations {
+        if location.grid_size.width == 0
+            || location.grid_size.height == 0
+            || location.grid_position.x < 0
+            || location.grid_position.y < 0
+            || location.grid_position.x as u32 + location.grid_size.width > world.grid.width
+            || location.grid_position.y as u32 + location.grid_size.height > world.grid.height
+        {
+            return Err(CoreError::InvalidLocationFootprint(location.id.clone()));
+        }
+
+        for y in
+            location.grid_position.y..location.grid_position.y + location.grid_size.height as i32
+        {
+            for x in
+                location.grid_position.x..location.grid_position.x + location.grid_size.width as i32
+            {
+                if let Some(existing) = occupied.insert((x, y), location.id.clone()) {
+                    return Err(CoreError::OverlappingLocation(
+                        location.id.clone(),
+                        existing,
+                    ));
+                }
             }
         }
     }
@@ -1461,6 +1799,17 @@ fn validate_hex_color(value: &str, field: &str) -> Result<(), ApiError> {
 
 fn conversation_id_for(location_id: &str) -> ConversationId {
     format!("conversation.{location_id}")
+}
+
+fn location_center(location: &LocationDefinition) -> GridPosition {
+    GridPosition {
+        x: location.grid_position.x + (location.grid_size.width as i32 / 2),
+        y: location.grid_position.y + (location.grid_size.height as i32 / 2),
+    }
+}
+
+fn human_block_name(index: usize) -> String {
+    format!("Block {index}")
 }
 
 fn insert_unique<T: Eq>(values: &mut Vec<T>, value: T) {
@@ -1549,7 +1898,13 @@ mod tests {
             },
         ));
         assert!(response.ok, "{response:?}");
-        engine.advance_ticks(MOVE_BASE_TICKS);
+        let ticks = match response.result {
+            Some(CommandResult::ActivityStarted {
+                estimated_ticks, ..
+            }) => estimated_ticks,
+            _ => MOVE_BASE_TICKS,
+        };
+        engine.advance_ticks(ticks);
     }
 
     #[test]
@@ -1580,6 +1935,34 @@ mod tests {
         assert!(matches!(
             Engine::new(missing_service_location),
             Err(CoreError::MissingServiceLocation(_, _))
+        ));
+
+        let mut invalid_grid = world();
+        invalid_grid.grid.width = 0;
+        assert!(matches!(
+            Engine::new(invalid_grid),
+            Err(CoreError::InvalidGrid)
+        ));
+
+        let mut invalid_terrain = world();
+        invalid_terrain.grid.terrain[0].pop();
+        assert!(matches!(
+            Engine::new(invalid_terrain),
+            Err(CoreError::InvalidTerrain)
+        ));
+
+        let mut invalid_footprint = world();
+        invalid_footprint.locations[0].grid_position.x = -1;
+        assert!(matches!(
+            Engine::new(invalid_footprint),
+            Err(CoreError::InvalidLocationFootprint(_))
+        ));
+
+        let mut overlapping = world();
+        overlapping.locations[1].grid_position = overlapping.locations[0].grid_position;
+        assert!(matches!(
+            Engine::new(overlapping),
+            Err(CoreError::OverlappingLocation(_, _))
         ));
 
         let mut empty = world();
@@ -1678,7 +2061,20 @@ mod tests {
             },
         ));
         assert!(response.ok);
-        engine.advance_ticks(MOVE_BASE_TICKS);
+        let Some(CommandResult::ActivityStarted {
+            estimated_ticks,
+            movement_path,
+            started_at_tick,
+            completes_at_tick,
+            ..
+        }) = response.result
+        else {
+            panic!("expected movement activity");
+        };
+        assert!(estimated_ticks >= MOVE_BASE_TICKS);
+        assert_eq!(movement_path.len(), 2);
+        assert_eq!(completes_at_tick - started_at_tick, estimated_ticks);
+        engine.advance_ticks(estimated_ticks);
         assert_eq!(
             engine.state().characters["char_mira"].location_id,
             "village.main_street"
@@ -1924,7 +2320,7 @@ mod tests {
         ));
         assert!(queued.ok, "{queued:?}");
         assert_eq!(engine.state().characters["char_mira"].reserved_coins, 2);
-        engine.advance_ticks(MOVE_BASE_TICKS);
+        engine.advance_ticks(6);
         assert_eq!(
             engine.state().characters["char_mira"].location_id,
             "village.cafe"
@@ -1939,7 +2335,7 @@ mod tests {
         );
         engine.advance_ticks(10);
         assert_eq!(engine.state().characters["char_mira"].coins, 8);
-        engine.advance_ticks(MOVE_BASE_TICKS);
+        engine.advance_ticks(20);
         assert_eq!(
             engine.state().characters["char_mira"].location_id,
             "village.main_street"
@@ -2049,6 +2445,32 @@ mod tests {
     }
 
     #[test]
+    fn world_growth_adds_capacity_deterministically() {
+        let mut first = engine();
+        let mut second = engine();
+        for index in 0..5 {
+            create(
+                &mut first,
+                &format!("char_a_{index}"),
+                &format!("A {index}"),
+            );
+            create(
+                &mut second,
+                &format!("char_a_{index}"),
+                &format!("A {index}"),
+            );
+        }
+        assert!(first.state().world.homes.len() > 3);
+        assert_eq!(first.state().world, second.state().world);
+        assert!(
+            first
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::WorldExpanded { .. }))
+        );
+    }
+
+    #[test]
     fn utility_accessors_and_zero_tick_advance_behave() {
         let mut engine = engine();
         assert_eq!(engine.events_after(Some(999)).len(), 0);
@@ -2145,7 +2567,7 @@ mod tests {
             },
         ));
         assert!(leave.ok);
-        engine.advance_ticks(MOVE_BASE_TICKS);
+        engine.advance_ticks(20);
         let leave_again = engine.apply(env(
             "char_mira",
             Command::Home {
@@ -2292,6 +2714,7 @@ mod tests {
             kind: ActivityKind::ReturningHome,
             status: ActivityStatus::Active,
             target_id: Some("village.home_1".to_string()),
+            movement_path: Vec::new(),
             started_at_tick: 0,
             completes_at_tick: 1,
             description: "return".to_string(),
@@ -2314,6 +2737,7 @@ mod tests {
             kind: ActivityKind::Moving,
             status: ActivityStatus::Active,
             target_id: None,
+            movement_path: Vec::new(),
             started_at_tick: 1,
             completes_at_tick: 2,
             description: "no target".to_string(),

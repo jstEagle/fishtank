@@ -1,0 +1,26 @@
+{
+  "name": "fishtank",
+  "private": true,
+  "packageManager": "pnpm@11.1.1",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "test": "pnpm test:all",
+    "test:all": "node scripts/test-all.mjs",
+    "test:performance": "node scripts/test-performance.mjs",
+    "edge:dev": "pnpm --filter @fishtank/edge dev",
+    "edge:test": "pnpm --filter @fishtank/edge test",
+    "edge:deploy": "pnpm --filter @fishtank/edge deploy",
+    "viewer:dev": "pnpm --filter @fishtank/viewer dev",
+    "viewer:build": "pnpm --filter @fishtank/viewer build",
+    "viewer:lint": "pnpm --filter @fishtank/viewer lint"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "canvas",
+      "esbuild",
+      "sharp",
+      "unrs-resolver",
+      "workerd"
+    ]
+  }
+}

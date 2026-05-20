@@ -20,7 +20,10 @@ The Rust core must support:
 
 ## World Rules
 
-- Locations are semantic graph nodes connected by exits.
+- The world owns an authoritative rectangular grid.
+- Every grid tile has an explicit terrain type: `ground`, `grass`, `path`, or `water`.
+- Locations occupy validated grid footprints; every footprint must fit within the grid and cannot overlap another location footprint.
+- Locations are semantic graph nodes connected by exits, with grid footprints used for storage, rendering, and future procedural growth.
 - Homes are ordinary locations with ownership and lock state.
 - Services are deterministic POIs with an item, cost, duration, and capacity.
 - Characters can observe while active and can speak while moving when the target is audible.
@@ -58,3 +61,6 @@ The test suite must cover:
 - Command freshness errors.
 - Snapshot round trip and deterministic command replay.
 - Server persistence helper behavior where practical.
+- Procedural stress tests with thousands of characters and actions.
+- Release-mode performance runs that report throughput plus p5, p50, p95,
+  p99, and max command latency under a server-sized memory cap.
