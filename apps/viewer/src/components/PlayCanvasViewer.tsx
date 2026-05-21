@@ -15,6 +15,7 @@ import {
   gridBounds,
   gridCellCenter,
   locationMap,
+  type InteractableRenderNode,
   type LocationRenderNode
 } from "@/lib/world-layout";
 
@@ -494,72 +495,22 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       });
     }
 
-    // Services as little tokens on top of host buildings.
+    // Services rendered as little menu signs standing beside their host.
     for (const service of serviceNodes) {
       const host = byLocation.get(service.locationId);
       if (!host) continue;
-      const token = primitive(`service-${service.id}`, "cylinder", flat("#f4ecdc"), {
-        x: 0.55,
-        y: 0.16,
-        z: 0.55
-      });
-      token.setPosition(service.position.x, locationTopHeight(host) + 0.1, service.position.z);
-      root.addChild(token);
-
-      const inner = primitive(`service-${service.id}-dot`, "cylinder", flat("#2a2622"), {
-        x: 0.18,
-        y: 0.18,
-        z: 0.18
-      });
-      inner.setPosition(service.position.x, locationTopHeight(host) + 0.18, service.position.z);
-      root.addChild(inner);
+      const prop = buildServiceProp(service.id, service.item);
+      prop.setPosition(service.position.x, 0, service.position.z);
+      root.addChild(prop);
     }
 
-    // Public interactables: boards, chess tables, pitch markers, mail drops.
+    // Public interactables as recognizable ground props (boards, mailbox, etc.).
     for (const interactable of interactableNodes) {
       const host = byLocation.get(interactable.locationId);
       if (!host) continue;
-      const color =
-        interactable.kind === "chess"
-          ? "#f7f0d8"
-          : interactable.kind === "sport"
-            ? "#f2f7ed"
-            : interactable.kind === "mail"
-              ? "#d8514b"
-              : interactable.kind === "vending"
-                ? "#70a9a1"
-                : interactable.kind === "board"
-                  ? "#57402d"
-                  : "#d5c28f";
-      const size =
-        interactable.kind === "chess"
-          ? { x: 0.48, y: 0.2, z: 0.48 }
-          : interactable.kind === "sport"
-            ? { x: 0.6, y: 0.08, z: 0.6 }
-            : interactable.kind === "board"
-              ? { x: 0.7, y: 0.5, z: 0.12 }
-              : { x: 0.42, y: 0.38, z: 0.34 };
-      const token = primitive(`interactable-${interactable.id}`, "box", flat(color), size);
-      token.setPosition(
-        interactable.position.x,
-        locationTopHeight(host) + size.y / 2 + 0.06,
-        interactable.position.z
-      );
-      root.addChild(token);
-
-      if (interactable.kind === "chess") {
-        const dark = primitive(`interactable-${interactable.id}-dark`, "box", flat("#28231d"), {
-          x: 0.22,
-          y: 0.04,
-          z: 0.22
-        });
-        dark.setPosition(
-          interactable.position.x,
-          locationTopHeight(host) + size.y + 0.1,
-          interactable.position.z
-        );
-        root.addChild(dark);
-      }
+      const prop = buildInteractableProp(interactable.id, interactable.kind);
+      prop.setPosition(interactable.position.x, 0, interactable.position.z);
+      root.addChild(prop);
     }
 
     // Characters.
@@ -667,6 +618,126 @@ function buildLocation(node: LocationRenderNode): pc.Entity {
       crown.setPosition(spot.x, 0.82, spot.z);
       group.addChild(crown);
     }
+    return group;
+  }
+
+  if (node.kind === "pitch") {
+    const lineColor = "#f5f9f1";
+    const w = node.size.x;
+    const d = node.size.z;
+    const h = 0.16;
+    const line = 0.07;
+    const surfaceY = h + 0.02;
+
+    // White ground slab — its uncovered border becomes the touchlines.
+    const frame = roundedBox(`${node.id}-frame`, flat(lineColor), w, h, d, Math.min(w, d) * 0.1);
+    frame.setLocalPosition(0, h / 2, 0);
+    group.addChild(frame);
+
+    // Green playing surface inset so the white frame reads as boundary lines.
+    const field = roundedBox(
+      `${node.id}-field`,
+      flat(node.topColor),
+      w - line * 2,
+      h + 0.04,
+      d - line * 2,
+      Math.min(w, d) * 0.08
+    );
+    field.setLocalPosition(0, h / 2 + 0.02, 0);
+    group.addChild(field);
+
+    // Mowing stripes for a real-turf feel.
+    const stripeCount = 6;
+    const stripeW = (w - line * 2) / stripeCount;
+    for (let i = 0; i < stripeCount; i += 1) {
+      if (i % 2 === 0) continue;
+      const stripe = primitive(`${node.id}-stripe-${i}`, "box", flat(darken(node.topColor, 0.92)), {
+        x: stripeW,
+        y: 0.01,
+        z: d - line * 2
+      });
+      stripe.setLocalPosition(-w / 2 + line + stripeW * (i + 0.5), surfaceY + 0.005, 0);
+      group.addChild(stripe);
+    }
+
+    const lineY = surfaceY + 0.02;
+    const innerD = d - line * 2;
+    const lineMat = flat(lineColor);
+
+    // Halfway line across the short axis.
+    const halfway = primitive(`${node.id}-halfway`, "box", lineMat, { x: line, y: 0.02, z: innerD });
+    halfway.setLocalPosition(0, lineY, 0);
+    group.addChild(halfway);
+
+    // Center circle drawn as a white disc with a green disc on top (a ring).
+    const circleR = Math.min(w, d) * 0.2;
+    const ring = primitive(`${node.id}-circle`, "cylinder", lineMat, {
+      x: circleR * 2,
+      y: 0.02,
+      z: circleR * 2
+    });
+    ring.setLocalPosition(0, lineY, 0);
+    group.addChild(ring);
+    const ringInner = primitive(`${node.id}-circle-in`, "cylinder", flat(node.topColor), {
+      x: circleR * 2 - line * 2,
+      y: 0.03,
+      z: circleR * 2 - line * 2
+    });
+    ringInner.setLocalPosition(0, lineY + 0.004, 0);
+    group.addChild(ringInner);
+
+    const spot = primitive(`${node.id}-spot`, "cylinder", lineMat, { x: 0.1, y: 0.03, z: 0.1 });
+    spot.setLocalPosition(0, lineY + 0.008, 0);
+    group.addChild(spot);
+
+    // Penalty boxes + goals at each end of the long axis.
+    const goalWidth = d * 0.4;
+    const goalHeight = 0.26;
+    const post = 0.05;
+    const boxDepth = w * 0.16;
+    const boxWidth = goalWidth + d * 0.2;
+    for (const sx of [-1, 1]) {
+      const goalLineX = sx * (w / 2 - line);
+
+      // Penalty area: front line + two side lines.
+      const frontX = sx * (w / 2 - line - boxDepth);
+      const front = primitive(`${node.id}-pbox-front-${sx}`, "box", lineMat, {
+        x: line,
+        y: 0.02,
+        z: boxWidth
+      });
+      front.setLocalPosition(frontX, lineY, 0);
+      group.addChild(front);
+      for (const sz of [-1, 1]) {
+        const side = primitive(`${node.id}-pbox-side-${sx}-${sz}`, "box", lineMat, {
+          x: boxDepth,
+          y: 0.02,
+          z: line
+        });
+        side.setLocalPosition(sx * (w / 2 - line - boxDepth / 2), lineY, (sz * boxWidth) / 2);
+        group.addChild(side);
+      }
+
+      // Goal frame: two posts + crossbar.
+      const postMat = flat("#fcfdfb");
+      for (const sz of [-1, 1]) {
+        const p = primitive(`${node.id}-post-${sx}-${sz}`, "box", postMat, {
+          x: post,
+          y: goalHeight,
+          z: post
+        });
+        p.setLocalPosition(goalLineX, surfaceY + goalHeight / 2, (sz * goalWidth) / 2);
+        group.addChild(p);
+      }
+      const bar = primitive(`${node.id}-bar-${sx}`, "box", postMat, {
+        x: post,
+        y: post,
+        z: goalWidth + post
+      });
+      bar.setLocalPosition(goalLineX, surfaceY + goalHeight, 0);
+      group.addChild(bar);
+    }
+
     return group;
   }
 
@@ -897,12 +968,141 @@ function buildCharacter(character: Character): CharacterRig {
   };
 }
 
+// A small standing menu sign for a service point (coffee window, vending, ...).
+function buildServiceProp(id: string, item: string): pc.Entity {
+  const group = new pc.Entity(`service-${id}`);
+  const wood = flat("#7a5d3e");
+
+  const post = primitive(`service-${id}-post`, "cylinder", wood, { x: 0.08, y: 0.66, z: 0.08 });
+  post.setLocalPosition(0, 0.33, 0);
+  group.addChild(post);
+
+  const board = roundedBox(`service-${id}-board`, flat("#f4ecdc"), 0.52, 0.4, 0.07, 0.07);
+  board.setLocalPosition(0, 0.74, 0);
+  group.addChild(board);
+
+  const accent = item.includes("coffee") ? "#6f4e37" : "#4f9a91";
+  const emblem = primitive(`service-${id}-emblem`, "cylinder", flat(accent), {
+    x: 0.2,
+    y: 0.05,
+    z: 0.2
+  });
+  emblem.setEulerAngles(90, 0, 0);
+  emblem.setLocalPosition(0, 0.76, 0.05);
+  group.addChild(emblem);
+
+  return group;
+}
+
+// Recognizable ground props for public interactables.
+function buildInteractableProp(id: string, kind: InteractableRenderNode["kind"]): pc.Entity {
+  const group = new pc.Entity(`interactable-${id}`);
+  const wood = flat("#6f5436");
+
+  if (kind === "sport") {
+    const r = 0.2;
+    const ball = primitive(`${id}-ball`, "sphere", flat("#fbfdfa"), { x: r * 2, y: r * 2, z: r * 2 });
+    ball.setLocalPosition(0, r, 0);
+    group.addChild(ball);
+    const patchSpots = [
+      { x: 0, y: r, z: 0 },
+      { x: r * 0.8, y: r * 0.2, z: r * 0.4 },
+      { x: -r * 0.6, y: r * 0.1, z: -r * 0.7 }
+    ];
+    patchSpots.forEach((s, i) => {
+      const patch = primitive(`${id}-patch-${i}`, "box", flat("#2a2622"), {
+        x: 0.12,
+        y: 0.04,
+        z: 0.12
+      });
+      patch.setLocalPosition(s.x, s.y, s.z);
+      group.addChild(patch);
+    });
+    return group;
+  }
+
+  if (kind === "mail") {
+    const post = primitive(`${id}-post`, "box", wood, { x: 0.08, y: 0.5, z: 0.08 });
+    post.setLocalPosition(0, 0.25, 0);
+    group.addChild(post);
+    const body = roundedBox(`${id}-body`, flat("#d8514b"), 0.34, 0.34, 0.5, 0.12);
+    body.setLocalPosition(0, 0.62, 0);
+    group.addChild(body);
+    const slot = primitive(`${id}-slot`, "box", flat("#2a2622"), { x: 0.22, y: 0.05, z: 0.02 });
+    slot.setLocalPosition(0, 0.7, 0.26);
+    group.addChild(slot);
+    return group;
+  }
+
+  if (kind === "vending") {
+    const body = roundedBox(`${id}-body`, flat("#4f9a91"), 0.5, 0.92, 0.4, 0.08);
+    body.setLocalPosition(0, 0.46, 0);
+    group.addChild(body);
+    const glass = primitive(`${id}-glass`, "box", flat("#23332f"), { x: 0.32, y: 0.56, z: 0.04 });
+    glass.setLocalPosition(0, 0.58, 0.2);
+    group.addChild(glass);
+    const tray = primitive(`${id}-tray`, "box", flat("#1c2825"), { x: 0.32, y: 0.06, z: 0.06 });
+    tray.setLocalPosition(0, 0.16, 0.2);
+    group.addChild(tray);
+    return group;
+  }
+
+  if (kind === "chess") {
+    const pedestal = primitive(`${id}-ped`, "cylinder", wood, { x: 0.16, y: 0.42, z: 0.16 });
+    pedestal.setLocalPosition(0, 0.21, 0);
+    group.addChild(pedestal);
+    const top = roundedBox(`${id}-top`, flat("#efe6cf"), 0.5, 0.08, 0.5, 0.05);
+    top.setLocalPosition(0, 0.46, 0);
+    group.addChild(top);
+    const cells = 4;
+    const cell = 0.44 / cells;
+    for (let i = 0; i < cells; i += 1) {
+      for (let j = 0; j < cells; j += 1) {
+        if ((i + j) % 2 === 0) continue;
+        const sq = primitive(`${id}-sq-${i}-${j}`, "box", flat("#3a322a"), {
+          x: cell,
+          y: 0.02,
+          z: cell
+        });
+        sq.setLocalPosition(-0.22 + cell * (i + 0.5), 0.51, -0.22 + cell * (j + 0.5));
+        group.addChild(sq);
+      }
+    }
+    return group;
+  }
+
+  if (kind === "board") {
+    for (const sx of [-1, 1]) {
+      const leg = primitive(`${id}-leg-${sx}`, "box", wood, { x: 0.06, y: 0.5, z: 0.06 });
+      leg.setLocalPosition(sx * 0.26, 0.25, 0);
+      group.addChild(leg);
+    }
+    const panel = roundedBox(`${id}-panel`, wood, 0.66, 0.42, 0.07, 0.05);
+    panel.setLocalPosition(0, 0.62, 0);
+    group.addChild(panel);
+    const paper = primitive(`${id}-paper`, "box", flat("#f5efdc"), { x: 0.52, y: 0.3, z: 0.02 });
+    paper.setLocalPosition(0, 0.62, 0.045);
+    group.addChild(paper);
+    return group;
+  }
+
+  // Generic crate.
+  const crate = roundedBox(`${id}-crate`, flat("#c9a87a"), 0.42, 0.4, 0.42, 0.06);
+  crate.setLocalPosition(0, 0.2, 0);
+  group.addChild(crate);
+  const lid = roundedBox(`${id}-lid`, flat("#dcc196"), 0.46, 0.06, 0.46, 0.06);
+  lid.setLocalPosition(0, 0.43, 0);
+  group.addChild(lid);
+  return group;
+}
+
 // ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
 
 function locationTopHeight(node: LocationRenderNode) {
   if (node.kind === "park") return 0.22;
+  if (node.kind === "pitch") return 0.2;
   if (node.kind === "street") return 0.08;
   const baseHeight = Math.max(0.45, node.size.y * 0.55);
   const topHeight = Math.max(0.32, node.size.y * 0.45);

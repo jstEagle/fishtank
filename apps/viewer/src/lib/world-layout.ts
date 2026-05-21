@@ -11,7 +11,7 @@ export interface Vec3 {
   z: number;
 }
 
-export type LocationKind = "home" | "cafe" | "office" | "park" | "street" | "generic";
+export type LocationKind = "home" | "cafe" | "office" | "park" | "pitch" | "street" | "generic";
 
 export interface LocationRenderNode {
   id: string;
@@ -72,6 +72,7 @@ const PALETTE: Record<LocationKind, { color: string; topColor: string }> = {
   cafe: { color: "#3f6f8f", topColor: "#e9d9b7" },
   office: { color: "#6d7f88", topColor: "#d6dde0" },
   park: { color: "#a8d58a", topColor: "#88c46c" },
+  pitch: { color: "#3f9d57", topColor: "#4cb766" },
   street: { color: "#e8dec8", topColor: "#f4ecdc" },
   generic: { color: "#cab9a0", topColor: "#e3d6bc" }
 };
@@ -89,6 +90,7 @@ export function locationKind(location: LocationDefinition): LocationKind {
   if (location.id.includes("cafe")) return "cafe";
   if (location.id.includes("office")) return "office";
   if (location.id.includes("park")) return "park";
+  if (location.id.includes("pitch") || location.id.includes("football")) return "pitch";
   if (location.id.includes("street") || location.id.includes("road") || location.id.includes("plaza")) {
     return "street";
   }
@@ -117,6 +119,8 @@ export function buildLocationLayout(snapshot: WorldSnapshot): LocationRenderNode
         ? { x: footprint.x, y: 1.05, z: footprint.z }
         : kind === "park"
         ? { x: footprint.x, y: 0.18, z: footprint.z }
+        : kind === "pitch"
+        ? { x: footprint.x, y: 0.16, z: footprint.z }
         : kind === "street"
         ? { x: footprint.x, y: 0.08, z: footprint.z }
         : { x: footprint.x, y: 0.9, z: footprint.z };
@@ -176,7 +180,9 @@ export function buildInteractableLayout(
     const base = host?.position ?? { x: 0, y: 0, z: 0 };
     const index = perLocation.get(interactable.location_id) ?? 0;
     perLocation.set(interactable.location_id, index + 1);
-    const spread = ((index % 4) - 1.5) * 0.45;
+    const lane = index % 3;
+    const row = Math.floor(index / 3);
+    const spread = (lane - 1) * 0.7;
     return {
       id: interactable.id,
       name: interactable.name,
@@ -185,7 +191,7 @@ export function buildInteractableLayout(
       position: {
         x: base.x + spread,
         y: 0,
-        z: base.z - (host?.size.z ?? 1.6) / 2 - 0.25 - Math.floor(index / 4) * 0.35
+        z: base.z + (host?.size.z ?? 1.6) / 2 + 0.8 + row * 0.55
       }
     };
   });
