@@ -35,6 +35,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
 
 const SINGLETON_STORAGE_KEY: &str = "singleton";
+const REAL_SECONDS_PER_TICK: u64 = 5;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -242,7 +243,7 @@ fn postgres_legacy_storage_keys() -> Vec<String> {
 }
 
 async fn run_simulation_clock(state: AppState) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let mut ticker = tokio::time::interval(Duration::from_secs(REAL_SECONDS_PER_TICK));
     loop {
         ticker.tick().await;
         let payload = {

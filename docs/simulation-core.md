@@ -50,7 +50,7 @@ Long-running commands can return promise-like handles. A promise represents a fu
 
 ## Tick And Action Timing
 
-The first version can use fixed ticks, such as 5 or 10 simulation ticks per second. Most agent-facing actions should not require frame-perfect timing. Higher-level actions can span many ticks:
+The first version uses fixed ticks at 5 real seconds per simulation tick. Most agent-facing actions should not require frame-perfect timing. Higher-level actions can span many ticks:
 
 - Walking to a table.
 - Waiting in line.

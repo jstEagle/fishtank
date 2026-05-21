@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: &str = "fishtank.v1";
-pub const TICKS_PER_REAL_SECOND: Tick = 5;
-pub const TICKS_PER_INGAME_DAY: Tick = 6 * 60 * 60 * TICKS_PER_REAL_SECOND;
+pub const REAL_SECONDS_PER_TICK: Tick = 5;
+pub const TICKS_PER_INGAME_DAY: Tick = (6 * 60 * 60) / REAL_SECONDS_PER_TICK;
 pub const OFFLINE_RETURN_HOME_TICKS: Tick = TICKS_PER_INGAME_DAY;
 pub const MAX_ACTIONS_PER_WAKE: usize = 3;
 

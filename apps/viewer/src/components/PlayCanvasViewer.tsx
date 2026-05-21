@@ -17,7 +17,7 @@ import {
   type LocationRenderNode
 } from "@/lib/world-layout";
 
-const TICKS_PER_REAL_SECOND = 1;
+const REAL_SECONDS_PER_TICK = 5;
 const PICK_RADIUS_PX = 56;
 const DRAG_THRESHOLD_PX = 6;
 
@@ -1004,7 +1004,7 @@ function statusColor(status: Character["status"]) {
 }
 
 function estimatedViewerTick(clock: { tick: number; at: number }, now: number) {
-  return clock.tick + ((now - clock.at) / 1000) * TICKS_PER_REAL_SECOND;
+  return clock.tick + (now - clock.at) / (1000 * REAL_SECONDS_PER_TICK);
 }
 
 function sceneSignature(snapshot: WorldSnapshot) {
