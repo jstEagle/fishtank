@@ -3,7 +3,17 @@ import { SCHEMA_VERSION, type Command, type CommandEnvelope, type CommandRespons
 export const DEFAULT_API_URL = "http://127.0.0.1:3838";
 
 export function apiBaseUrl() {
-  return (process.env.NEXT_PUBLIC_FISHTANK_API_URL ?? DEFAULT_API_URL).replace(/\/$/, "");
+  const configuredApi = process.env.NEXT_PUBLIC_FISHTANK_API_URL?.trim();
+  if (configuredApi) {
+    return configuredApi.replace(/\/$/, "");
+  }
+
+  const edge = edgeBaseUrl();
+  if (edge) {
+    return `${edge}/v1`;
+  }
+
+  return DEFAULT_API_URL;
 }
 
 export function edgeBaseUrl() {

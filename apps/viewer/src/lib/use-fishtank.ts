@@ -225,7 +225,7 @@ export function useFishtank(): ViewerState {
       clearLiveTimers();
       wsRef.current?.close();
     };
-  }, [liveUrl]);
+  }, [apiUrl, liveUrl]);
 
   return {
     apiUrl,
