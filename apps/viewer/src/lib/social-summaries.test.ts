@@ -132,6 +132,7 @@ function snapshot(): WorldSnapshot {
           coin_reward: 1
         }
       ],
+      interactables: [],
       spawn_location_id: "village.office"
     },
     characters: {

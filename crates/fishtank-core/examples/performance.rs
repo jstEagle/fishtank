@@ -419,6 +419,7 @@ fn generated_world(width: usize, height: usize, player_count: usize) -> WorldDef
         homes,
         services,
         activity_sites: Vec::new(),
+        interactables: Vec::new(),
         spawn_location_id: location_id(0, 0),
     }
 }

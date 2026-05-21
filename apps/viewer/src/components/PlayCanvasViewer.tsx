@@ -10,6 +10,7 @@ import {
 } from "@/lib/character-visual-position";
 import {
   buildLocationLayout,
+  buildInteractableLayout,
   buildServiceLayout,
   gridBounds,
   gridCellCenter,
@@ -474,6 +475,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     const locationNodes = buildLocationLayout(snapshot);
     const byLocation = locationMap(locationNodes);
     const serviceNodes = buildServiceLayout(snapshot.world.services, locationNodes);
+    const interactableNodes = buildInteractableLayout(snapshot.world.interactables, locationNodes);
 
     root.addChild(buildWorldGrid(snapshot));
 
@@ -511,6 +513,53 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       });
       inner.setPosition(service.position.x, locationTopHeight(host) + 0.18, service.position.z);
       root.addChild(inner);
+    }
+
+    // Public interactables: boards, chess tables, pitch markers, mail drops.
+    for (const interactable of interactableNodes) {
+      const host = byLocation.get(interactable.locationId);
+      if (!host) continue;
+      const color =
+        interactable.kind === "chess"
+          ? "#f7f0d8"
+          : interactable.kind === "sport"
+            ? "#f2f7ed"
+            : interactable.kind === "mail"
+              ? "#d8514b"
+              : interactable.kind === "vending"
+                ? "#70a9a1"
+                : interactable.kind === "board"
+                  ? "#57402d"
+                  : "#d5c28f";
+      const size =
+        interactable.kind === "chess"
+          ? { x: 0.48, y: 0.2, z: 0.48 }
+          : interactable.kind === "sport"
+            ? { x: 0.6, y: 0.08, z: 0.6 }
+            : interactable.kind === "board"
+              ? { x: 0.7, y: 0.5, z: 0.12 }
+              : { x: 0.42, y: 0.38, z: 0.34 };
+      const token = primitive(`interactable-${interactable.id}`, "box", flat(color), size);
+      token.setPosition(
+        interactable.position.x,
+        locationTopHeight(host) + size.y / 2 + 0.06,
+        interactable.position.z
+      );
+      root.addChild(token);
+
+      if (interactable.kind === "chess") {
+        const dark = primitive(`interactable-${interactable.id}-dark`, "box", flat("#28231d"), {
+          x: 0.22,
+          y: 0.04,
+          z: 0.22
+        });
+        dark.setPosition(
+          interactable.position.x,
+          locationTopHeight(host) + size.y + 0.1,
+          interactable.position.z
+        );
+        root.addChild(dark);
+      }
     }
 
     // Characters.
@@ -1020,6 +1069,11 @@ function sceneSignature(snapshot: WorldSnapshot) {
       location.facing
     ]),
     services: snapshot.world.services.map((service) => [service.id, service.location_id]),
+    interactables: snapshot.world.interactables.map((interactable) => [
+      interactable.id,
+      interactable.location_id,
+      interactable.actions.join(",")
+    ]),
     characters: characterIds
   });
 }

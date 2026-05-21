@@ -70,16 +70,17 @@
       "grid_position": {"x": 4, "y": 4},
       "grid_size": {"width": 5, "height": 2},
       "facing": "south",
-      "exits": ["village.home_1", "village.home_2", "village.home_3", "village.cafe", "village.park", "village.office"],
+      "exits": ["village.home_1", "village.home_2", "village.home_3", "village.cafe", "village.park", "village.office", "village.football_pitch"],
       "directional_exits": {
         "north": "village.cafe",
         "south": "village.park",
         "east": "village.home_1",
         "west": "village.home_2",
         "forward": "village.cafe",
-        "back": "village.park"
+        "back": "village.park",
+        "left": "village.football_pitch"
       },
-      "poi_ids": [],
+      "poi_ids": ["village.main_street.notice_board", "village.main_street.job_board", "village.main_street.mail_drop"],
       "private_home": false
     },
     {
@@ -91,7 +92,7 @@
       "facing": "west",
       "exits": ["village.main_street"],
       "directional_exits": {"west": "village.main_street", "back": "village.main_street"},
-      "poi_ids": ["village.office.workstation", "village.office.vending_machine"],
+      "poi_ids": ["village.office.workstation", "village.office.vending_machine", "village.office.task_terminal"],
       "private_home": false
     },
     {
@@ -103,7 +104,7 @@
       "facing": "south",
       "exits": ["village.main_street"],
       "directional_exits": {"south": "village.main_street", "back": "village.main_street"},
-      "poi_ids": ["village.cafe.service_window"],
+      "poi_ids": ["village.cafe.service_window", "village.cafe.specials_board"],
       "private_home": false
     },
     {
@@ -115,7 +116,19 @@
       "facing": "north",
       "exits": ["village.main_street"],
       "directional_exits": {"north": "village.main_street", "back": "village.main_street"},
-      "poi_ids": ["village.park.bench", "village.park.chess_table"],
+      "poi_ids": ["village.park.bench", "village.park.chess_table", "village.park.chess_board_1"],
+      "private_home": false
+    },
+    {
+      "id": "village.football_pitch",
+      "name": "Five-a-side Pitch",
+      "description": "A small public football pitch with bright lines, short goals, and space for agents to start a casual match.",
+      "grid_position": {"x": 0, "y": 8},
+      "grid_size": {"width": 4, "height": 3},
+      "facing": "east",
+      "exits": ["village.main_street"],
+      "directional_exits": {"east": "village.main_street", "back": "village.main_street"},
+      "poi_ids": ["village.football_pitch.center_spot"],
       "private_home": false
     }
   ],
@@ -187,6 +200,104 @@
       "description": "A public chess table for lingering, thinking, and inviting another agent to play.",
       "duration_ticks": 20,
       "coin_reward": 0
+    }
+  ],
+  "interactables": [
+    {
+      "id": "village.main_street.notice_board",
+      "name": "Notice Board",
+      "location_id": "village.main_street",
+      "description": "A public board for short messages and social hooks.",
+      "actions": ["post_notice", "look_at"],
+      "price_coins": 0,
+      "reward_coins": 0,
+      "duration_ticks": 0,
+      "capacity": 0,
+      "public_state": {"visibility": "public"}
+    },
+    {
+      "id": "village.main_street.job_board",
+      "name": "Job Board",
+      "location_id": "village.main_street",
+      "description": "A rotating board of small public errands agents can choose to pursue locally.",
+      "actions": ["look_at", "take_errand"],
+      "price_coins": 0,
+      "reward_coins": 1,
+      "duration_ticks": 12,
+      "capacity": 3,
+      "public_state": {"errand": "visit a public POI and report back"}
+    },
+    {
+      "id": "village.main_street.mail_drop",
+      "name": "Mail Drop",
+      "location_id": "village.main_street",
+      "description": "A small slot for leaving public notes and delivery prompts.",
+      "actions": ["post_notice", "look_at"],
+      "price_coins": 0,
+      "reward_coins": 0,
+      "duration_ticks": 0,
+      "capacity": 0,
+      "public_state": {"visibility": "public"}
+    },
+    {
+      "id": "village.cafe.specials_board",
+      "name": "Cafe Specials Board",
+      "location_id": "village.cafe",
+      "description": "A chalkboard with cafe prompts agents can mention or use as conversation hooks.",
+      "actions": ["look_at"],
+      "price_coins": 0,
+      "reward_coins": 0,
+      "duration_ticks": 0,
+      "capacity": 0,
+      "public_state": {"special": "share a coffee with someone nearby"}
+    },
+    {
+      "id": "village.office.task_terminal",
+      "name": "Office Task Terminal",
+      "location_id": "village.office",
+      "description": "A shared terminal with simple verifiable work tasks.",
+      "actions": ["complete_task", "look_at"],
+      "price_coins": 0,
+      "reward_coins": 2,
+      "duration_ticks": 18,
+      "capacity": 2,
+      "public_state": {"task": "sort maintenance tickets"}
+    },
+    {
+      "id": "village.office.vending_machine.interactable",
+      "name": "Snack Vending Buttons",
+      "location_id": "village.office",
+      "description": "Public vending buttons for small snacks and drinks.",
+      "actions": ["buy_item", "look_at"],
+      "price_coins": 1,
+      "reward_coins": 0,
+      "duration_ticks": 4,
+      "capacity": 1,
+      "public_state": {"item": "sparkling water"}
+    },
+    {
+      "id": "village.park.chess_board_1",
+      "name": "Park Lichess Board",
+      "location_id": "village.park",
+      "description": "A physical meeting point for externally enforced Lichess games.",
+      "actions": ["invite_chess", "reserve_board", "register_external_game", "view_game", "record_game_result", "look_at"],
+      "price_coins": 0,
+      "reward_coins": 0,
+      "duration_ticks": 0,
+      "capacity": 2,
+      "public_state": {"provider": "lichess"}
+    },
+    {
+      "id": "village.football_pitch.center_spot",
+      "name": "Football Center Spot",
+      "location_id": "village.football_pitch",
+      "description": "A public start point for a casual five-a-side kickabout.",
+      "actions": ["start_activity", "join_activity", "look_at"],
+      "price_coins": 0,
+      "reward_coins": 0,
+      "duration_ticks": 16,
+      "capacity": 6,
+      "public_state": {"activity": "football"}
     }
   ]
 }

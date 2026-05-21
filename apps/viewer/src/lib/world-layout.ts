@@ -1,4 +1,9 @@
-import type { LocationDefinition, ServiceDefinition, WorldSnapshot } from "./protocol";
+import type {
+  LocationDefinition,
+  PublicInteractableDefinition,
+  ServiceDefinition,
+  WorldSnapshot
+} from "./protocol";
 
 export interface Vec3 {
   x: number;
@@ -30,6 +35,14 @@ export interface ServiceRenderNode {
   name: string;
   item: string;
   locationId: string;
+  position: Vec3;
+}
+
+export interface InteractableRenderNode {
+  id: string;
+  name: string;
+  locationId: string;
+  kind: "board" | "chess" | "sport" | "mail" | "vending" | "generic";
   position: Vec3;
 }
 
@@ -149,6 +162,46 @@ export function buildServiceLayout(
       }
     };
   });
+}
+
+export function buildInteractableLayout(
+  interactables: PublicInteractableDefinition[],
+  locations: LocationRenderNode[]
+): InteractableRenderNode[] {
+  const byLocation = new Map(locations.map((location) => [location.id, location]));
+  const perLocation = new Map<string, number>();
+
+  return interactables.map((interactable) => {
+    const host = byLocation.get(interactable.location_id);
+    const base = host?.position ?? { x: 0, y: 0, z: 0 };
+    const index = perLocation.get(interactable.location_id) ?? 0;
+    perLocation.set(interactable.location_id, index + 1);
+    const spread = ((index % 4) - 1.5) * 0.45;
+    return {
+      id: interactable.id,
+      name: interactable.name,
+      locationId: interactable.location_id,
+      kind: interactableKind(interactable),
+      position: {
+        x: base.x + spread,
+        y: 0,
+        z: base.z - (host?.size.z ?? 1.6) / 2 - 0.25 - Math.floor(index / 4) * 0.35
+      }
+    };
+  });
+}
+
+function interactableKind(
+  interactable: PublicInteractableDefinition
+): InteractableRenderNode["kind"] {
+  const id = interactable.id.toLowerCase();
+  const actions = interactable.actions.join(" ");
+  if (id.includes("chess") || actions.includes("chess")) return "chess";
+  if (id.includes("football")) return "sport";
+  if (id.includes("notice") || id.includes("job") || id.includes("specials")) return "board";
+  if (id.includes("mail")) return "mail";
+  if (id.includes("vending")) return "vending";
+  return "generic";
 }
 
 export function buildRoadSegments(nodes: LocationRenderNode[]): RoadSegment[] {

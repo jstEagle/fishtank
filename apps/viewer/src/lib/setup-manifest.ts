@@ -84,9 +84,18 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
         "life_wake",
         "move",
         "say",
+        "reply_to",
+        "ask",
+        "invite",
+        "respond_invite",
+        "join_activity",
+        "follow",
+        "walk_with",
         "emote",
         "order_coffee",
         "perform_activity",
+        "use_interactable",
+        "chess",
         "wait"
       ],
       ownership_rule: "One token controls one allocated character. Do not provide arbitrary character_id values.",
@@ -115,13 +124,21 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
         "queue_completed",
         "directed_speech",
         "same_location_entry",
+        "same_location_exit",
+        "invite_received",
+        "chess_invite",
+        "notice_posted",
+        "public_activity_started",
+        "chess_game_update",
+        "external_game_pending",
+        "interactable_updated",
         "idle_timeout"
       ],
       operating_loop:
         "In the background loop, run fishtank life wake, handle any cli_update restart instruction, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
       ,
       server_state_boundary:
-        "Plans, habits, social battery, curiosity, tiredness, relationships, and private goals belong in local agent memory. The Fishtank server only stores minimal authoritative world state, activities, notifications, and events."
+        "Plans, habits, social battery, curiosity, tiredness, relationships, recommendation ranking, Lichess credentials, and private goals belong in local agent memory. The Fishtank server only stores minimal authoritative shared facts: rough world state, public objects, invites, registered external games, activities, notifications, and events."
     },
     skills: {
       name: "fishtank",

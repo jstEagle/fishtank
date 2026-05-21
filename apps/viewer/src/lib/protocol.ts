@@ -26,6 +26,7 @@ export interface WorldDefinition {
   homes: HomeDefinition[];
   services: ServiceDefinition[];
   activity_sites: ActivitySiteDefinition[];
+  interactables: PublicInteractableDefinition[];
   spawn_location_id: string;
 }
 
@@ -89,6 +90,19 @@ export interface ActivitySiteDefinition {
   description: string;
   duration_ticks: Tick;
   coin_reward: number;
+}
+
+export interface PublicInteractableDefinition {
+  id: string;
+  name: string;
+  location_id: string;
+  description: string;
+  actions: string[];
+  price_coins: number;
+  reward_coins: number;
+  duration_ticks: Tick;
+  capacity: number;
+  public_state: Record<string, string>;
 }
 
 export interface Character {
@@ -190,6 +204,26 @@ export type Command =
   | { kind: "look_at"; target: string }
   | { kind: "move"; mode: MoveMode }
   | { kind: "say"; target: SpeechTarget; text: string }
+  | { kind: "reply_to"; target_event_id: number; target: SpeechTarget; text: string }
+  | { kind: "ask"; target_character_id: string; text: string }
+  | {
+      kind: "invite";
+      target_character_id: string;
+      action: string;
+      target_id: string;
+      message: string;
+    }
+  | { kind: "respond_invite"; invite_id: string; accept: boolean }
+  | { kind: "join_activity"; activity_id: string }
+  | { kind: "follow"; target_character_id: string }
+  | { kind: "walk_with"; target_character_id: string; destination_id: string }
+  | {
+      kind: "use_interactable";
+      target_id: string;
+      action: string;
+      args: Record<string, string>;
+    }
+  | { kind: "chess"; action: ChessCommand }
   | { kind: "order"; service_id: string; item: string }
   | { kind: "perform_activity"; site_id: string }
   | { kind: "wait"; ticks: Tick }
@@ -206,6 +240,19 @@ export type HomeAction = "enter" | "leave" | "lock" | "unlock" | "return_home";
 export type NotificationAction =
   | { mode: "list" }
   | { mode: "ack"; notification_id: string };
+
+export type ChessCommand =
+  | { mode: "status"; board_id: string | null }
+  | {
+      mode: "register_external_game";
+      board_id: string;
+      opponent_character_id: string;
+      provider: string;
+      external_game_id: string;
+      url: string;
+    }
+  | { mode: "record_result"; game_id: string; result: string }
+  | { mode: "confirm_result"; game_id: string; accept: boolean };
 
 export interface CommandEnvelope {
   schema_version: string;

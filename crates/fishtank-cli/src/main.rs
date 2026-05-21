@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use fishtank_protocol::{
-    AuthenticatedCharacterRequest, Command, CommandEnvelope, Direction, HomeAction, MoveMode,
-    NotificationAction, SCHEMA_VERSION, SpeechTarget,
+    AuthenticatedCharacterRequest, ChessCommand, Command, CommandEnvelope, Direction, HomeAction,
+    MoveMode, NotificationAction, SCHEMA_VERSION, SpeechTarget,
 };
 use std::{
     env,
@@ -51,7 +51,18 @@ enum Commands {
     Actions,
     Move(MoveArgs),
     Say(SayArgs),
+    Reply(ReplyArgs),
+    Ask(AskArgs),
+    Invite(InviteArgs),
+    RespondInvite(RespondInviteArgs),
+    JoinActivity(JoinActivityArgs),
+    Follow(FollowArgs),
+    WalkWith(WalkWithArgs),
     Act(ActArgs),
+    Chess {
+        #[command(subcommand)]
+        command: ChessCommands,
+    },
     Wait(WaitArgs),
     Home {
         #[command(subcommand)]
@@ -120,6 +131,64 @@ struct SayArgs {
 }
 
 #[derive(Args)]
+struct ReplyArgs {
+    #[arg(long)]
+    to_event: u64,
+    #[arg(long)]
+    to: Option<String>,
+    text: String,
+}
+
+#[derive(Args)]
+struct AskArgs {
+    #[arg(long)]
+    to: String,
+    text: String,
+}
+
+#[derive(Args)]
+struct InviteArgs {
+    #[arg(long)]
+    to: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long)]
+    target: String,
+    #[arg(long, default_value = "Want to join?")]
+    message: String,
+}
+
+#[derive(Args)]
+struct RespondInviteArgs {
+    #[arg(long)]
+    invite_id: String,
+    #[arg(long, conflicts_with = "decline")]
+    accept: bool,
+    #[arg(long, conflicts_with = "accept")]
+    decline: bool,
+}
+
+#[derive(Args)]
+struct JoinActivityArgs {
+    #[arg(long)]
+    activity_id: String,
+}
+
+#[derive(Args)]
+struct FollowArgs {
+    #[arg(long)]
+    target: String,
+}
+
+#[derive(Args)]
+struct WalkWithArgs {
+    #[arg(long)]
+    target: String,
+    #[arg(long)]
+    destination: String,
+}
+
+#[derive(Args)]
 struct ActArgs {
     #[arg(long)]
     kind: String,
@@ -127,6 +196,63 @@ struct ActArgs {
     target: String,
     #[arg(long)]
     item: Option<String>,
+    #[arg(long)]
+    action: Option<String>,
+    #[arg(long)]
+    text: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum ChessCommands {
+    Status(ChessStatusArgs),
+    Register(ChessRegisterArgs),
+    Result(ChessResultArgs),
+    Confirm(ChessConfirmArgs),
+    LichessChallenge(LichessChallengeArgs),
+}
+
+#[derive(Args)]
+struct ChessStatusArgs {
+    #[arg(long)]
+    board: Option<String>,
+}
+
+#[derive(Args)]
+struct ChessRegisterArgs {
+    #[arg(long)]
+    board: String,
+    #[arg(long)]
+    opponent: String,
+    #[arg(long, default_value = "lichess")]
+    provider: String,
+    #[arg(long)]
+    external_game_id: String,
+    #[arg(long)]
+    url: String,
+}
+
+#[derive(Args)]
+struct ChessResultArgs {
+    #[arg(long)]
+    game_id: String,
+    #[arg(long)]
+    result: String,
+}
+
+#[derive(Args)]
+struct ChessConfirmArgs {
+    #[arg(long)]
+    game_id: String,
+    #[arg(long, conflicts_with = "dispute")]
+    accept: bool,
+    #[arg(long, conflicts_with = "accept")]
+    dispute: bool,
+}
+
+#[derive(Args)]
+struct LichessChallengeArgs {
+    #[arg(long)]
+    opponent_username: String,
 }
 
 #[derive(Args)]
@@ -362,6 +488,102 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Reply(args) => {
+            let target = args
+                .to
+                .map(SpeechTarget::Character)
+                .unwrap_or(SpeechTarget::Room);
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::ReplyTo {
+                    target_event_id: args.to_event,
+                    target,
+                    text: args.text,
+                },
+            )
+            .await?;
+        }
+        Commands::Ask(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::Ask {
+                    target_character_id: args.to,
+                    text: args.text,
+                },
+            )
+            .await?;
+        }
+        Commands::Invite(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::Invite {
+                    target_character_id: args.to,
+                    action: args.action,
+                    target_id: args.target,
+                    message: args.message,
+                },
+            )
+            .await?;
+        }
+        Commands::RespondInvite(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::RespondInvite {
+                    invite_id: args.invite_id,
+                    accept: args.accept && !args.decline,
+                },
+            )
+            .await?;
+        }
+        Commands::JoinActivity(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::JoinActivity {
+                    activity_id: args.activity_id,
+                },
+            )
+            .await?;
+        }
+        Commands::Follow(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::Follow {
+                    target_character_id: args.target,
+                },
+            )
+            .await?;
+        }
+        Commands::WalkWith(args) => {
+            send_command(
+                &client,
+                &cli.url,
+                &cli.character,
+                token.as_deref(),
+                Command::WalkWith {
+                    target_character_id: args.target,
+                    destination_id: args.destination,
+                },
+            )
+            .await?;
+        }
         Commands::Act(args) => {
             let command = match args.kind.as_str() {
                 "order" => Command::Order {
@@ -371,10 +593,98 @@ async fn main() -> Result<()> {
                 "activity" => Command::PerformActivity {
                     site_id: args.target,
                 },
-                _ => anyhow::bail!("supported act kinds are order and activity"),
+                "interactable" => {
+                    let mut args_map = std::collections::BTreeMap::new();
+                    if let Some(text) = args.text {
+                        args_map.insert("text".to_string(), text);
+                    }
+                    Command::UseInteractable {
+                        target_id: args.target,
+                        action: args.action.unwrap_or_else(|| "look_at".to_string()),
+                        args: args_map,
+                    }
+                }
+                _ => anyhow::bail!("supported act kinds are order, activity, and interactable"),
             };
             send_command(&client, &cli.url, &cli.character, token.as_deref(), command).await?;
         }
+        Commands::Chess { command } => match command {
+            ChessCommands::Status(args) => {
+                send_command(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    Command::Chess {
+                        action: ChessCommand::Status {
+                            board_id: args.board,
+                        },
+                    },
+                )
+                .await?;
+            }
+            ChessCommands::Register(args) => {
+                send_command(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    Command::Chess {
+                        action: ChessCommand::RegisterExternalGame {
+                            board_id: args.board,
+                            opponent_character_id: args.opponent,
+                            provider: args.provider,
+                            external_game_id: args.external_game_id,
+                            url: args.url,
+                        },
+                    },
+                )
+                .await?;
+            }
+            ChessCommands::Result(args) => {
+                send_command(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    Command::Chess {
+                        action: ChessCommand::RecordResult {
+                            game_id: args.game_id,
+                            result: args.result,
+                        },
+                    },
+                )
+                .await?;
+            }
+            ChessCommands::Confirm(args) => {
+                send_command(
+                    &client,
+                    &cli.url,
+                    &cli.character,
+                    token.as_deref(),
+                    Command::Chess {
+                        action: ChessCommand::ConfirmResult {
+                            game_id: args.game_id,
+                            accept: args.accept && !args.dispute,
+                        },
+                    },
+                )
+                .await?;
+            }
+            ChessCommands::LichessChallenge(args) => {
+                let token = env::var("LICHESS_TOKEN").context(
+                    "LICHESS_TOKEN is required locally; Fishtank does not store Lichess credentials",
+                )?;
+                print_json(serde_json::json!({
+                    "ok": false,
+                    "local_only": true,
+                    "provider": "lichess",
+                    "opponent_username": args.opponent_username,
+                    "token_present": !token.is_empty(),
+                    "next_step": "Create the challenge with the Lichess Board/Bot API locally, then register the resulting game with `fishtank chess register`."
+                }))?;
+            }
+        },
         Commands::Wait(args) => {
             send_command(
                 &client,
@@ -797,15 +1107,15 @@ async fn life_wake_packet(
             "action_loop": [
                 "Review observation and local_memory.",
                 "If cli_update.update_available is true, run fishtank update install and restart this long-running agent process.",
-                "Choose zero to max_actions normal Fishtank CLI actions.",
-                "Use fishtank move, say, act, wait, home, or notifications.",
+                "Choose zero to max_actions useful Fishtank CLI actions; prefer social follow-up, nearby agents, new POIs, public interactables, and pending promises over quiet routine.",
+                "Use fishtank move, say, reply, ask, invite, respond-invite, follow, walk-with, act, chess, wait, home, or notifications.",
                 "Update local memory at memory_path if useful.",
                 "Sleep or call fishtank notifications wait before the next wake."
             ],
-            "server_state_boundary": "Keep plans, habits, social battery, curiosity, tiredness, relationships, and private goals in local agent memory. The Fishtank server only stores minimal authoritative world state, activities, notifications, and events."
+            "server_state_boundary": "Keep plans, habits, social battery, curiosity, tiredness, relationships, recommendations, Lichess credentials, and private goals in local agent memory. The Fishtank server only stores minimal authoritative shared facts: rough world state, public objects, invites, registered external games, activities, notifications, and events."
         },
         "markdown": format!(
-            "Wake reason: {wake_reason}\nMemory: {}\nChoose up to {max_actions} action(s), then persist local memory and sleep.",
+            "Wake reason: {wake_reason}\nMemory: {}\nChoose up to {max_actions} useful/social action(s), then persist local memory and sleep.",
             memory_path.display()
         )
     }))

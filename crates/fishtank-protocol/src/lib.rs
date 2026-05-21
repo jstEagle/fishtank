@@ -33,6 +33,8 @@ pub struct WorldDefinition {
     pub services: Vec<ServiceDefinition>,
     #[serde(default)]
     pub activity_sites: Vec<ActivitySiteDefinition>,
+    #[serde(default)]
+    pub interactables: Vec<PublicInteractableDefinition>,
     pub spawn_location_id: LocationId,
 }
 
@@ -132,6 +134,25 @@ pub struct ActivitySiteDefinition {
     pub duration_ticks: Tick,
     #[serde(default)]
     pub coin_reward: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct PublicInteractableDefinition {
+    pub id: EntityId,
+    pub name: String,
+    pub location_id: LocationId,
+    pub description: String,
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub price_coins: u32,
+    #[serde(default)]
+    pub reward_coins: u32,
+    #[serde(default)]
+    pub duration_ticks: Tick,
+    #[serde(default)]
+    pub capacity: u32,
+    #[serde(default)]
+    pub public_state: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -269,6 +290,44 @@ pub enum Command {
         target: SpeechTarget,
         text: String,
     },
+    ReplyTo {
+        target_event_id: EventId,
+        target: SpeechTarget,
+        text: String,
+    },
+    Ask {
+        target_character_id: CharacterId,
+        text: String,
+    },
+    Invite {
+        target_character_id: CharacterId,
+        action: String,
+        target_id: EntityId,
+        message: String,
+    },
+    RespondInvite {
+        invite_id: String,
+        accept: bool,
+    },
+    JoinActivity {
+        activity_id: String,
+    },
+    Follow {
+        target_character_id: CharacterId,
+    },
+    WalkWith {
+        target_character_id: CharacterId,
+        destination_id: LocationId,
+    },
+    UseInteractable {
+        target_id: EntityId,
+        action: String,
+        #[serde(default)]
+        args: BTreeMap<String, String>,
+    },
+    Chess {
+        action: ChessCommand,
+    },
     Order {
         service_id: EntityId,
         item: String,
@@ -305,6 +364,29 @@ pub enum QueueableCommand {
     PerformActivity { site_id: EntityId },
     Wait { ticks: Tick },
     Home { action: HomeAction },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum ChessCommand {
+    Status {
+        board_id: Option<EntityId>,
+    },
+    RegisterExternalGame {
+        board_id: EntityId,
+        opponent_character_id: CharacterId,
+        provider: String,
+        external_game_id: String,
+        url: String,
+    },
+    RecordResult {
+        game_id: String,
+        result: String,
+    },
+    ConfirmResult {
+        game_id: String,
+        accept: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -373,6 +455,19 @@ pub enum CommandResult {
     },
     MessageSpoken {
         conversation_id: ConversationId,
+    },
+    SocialUpdated {
+        kind: String,
+        id: String,
+        summary: String,
+    },
+    InteractableUpdated {
+        interactable_id: EntityId,
+        action: String,
+        summary: String,
+    },
+    ChessUpdated {
+        games: Vec<ExternalGame>,
     },
     Waited {
         advanced_ticks: Tick,
@@ -459,6 +554,8 @@ pub struct AgentObservation {
     pub notifications: Vec<Notification>,
     pub open_promises: Vec<AgentPromiseView>,
     pub available_affordances: Vec<ActionView>,
+    #[serde(default)]
+    pub recommended_actions: Vec<AgentRecommendedAction>,
     pub memory_hints: AgentMemoryHints,
     pub limits: AgentWakeLimits,
 }
@@ -502,10 +599,24 @@ pub struct AgentMemoryHints {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct AgentRecommendedAction {
+    pub reason: String,
+    pub action: String,
+    pub target: Option<EntityId>,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct AgentInteractionSummary {
     pub with: CharacterId,
     pub summary: String,
     pub last_seen_tick: Tick,
+    pub last_spoke_tick: Option<Tick>,
+    pub last_shared_activity_tick: Option<Tick>,
+    pub pending_invite_id: Option<String>,
+    pub unanswered_directed_speech: bool,
+    #[serde(default)]
+    pub recent_event_ids: Vec<EventId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -557,6 +668,12 @@ pub struct WorldSnapshot {
     pub conversations: BTreeMap<ConversationId, Conversation>,
     pub notifications: BTreeMap<NotificationId, Notification>,
     #[serde(default)]
+    pub public_invites: BTreeMap<String, PublicInvite>,
+    #[serde(default)]
+    pub public_notices: BTreeMap<String, PublicNotice>,
+    #[serde(default)]
+    pub external_games: BTreeMap<String, ExternalGame>,
+    #[serde(default)]
     pub command_log: Vec<CommandEnvelope>,
 }
 
@@ -596,6 +713,45 @@ pub enum EventKind {
         speaker_id: CharacterId,
         target: SpeechTarget,
         text: String,
+    },
+    ReplySpoken {
+        conversation_id: ConversationId,
+        speaker_id: CharacterId,
+        target_event_id: EventId,
+        target: SpeechTarget,
+        text: String,
+    },
+    InviteCreated {
+        invite_id: String,
+        from_character_id: CharacterId,
+        to_character_id: CharacterId,
+        action: String,
+        target_id: EntityId,
+    },
+    InviteResponded {
+        invite_id: String,
+        responder_id: CharacterId,
+        accepted: bool,
+    },
+    PublicNoticePosted {
+        notice_id: String,
+        board_id: EntityId,
+        author_id: CharacterId,
+    },
+    PublicInteractableUsed {
+        interactable_id: EntityId,
+        character_id: CharacterId,
+        action: String,
+    },
+    ExternalGameRegistered {
+        game_id: String,
+        board_id: EntityId,
+        provider: String,
+    },
+    ExternalGameResultReported {
+        game_id: String,
+        result: String,
+        reporter_id: CharacterId,
     },
     ActivityStarted {
         character_id: CharacterId,
@@ -685,6 +841,64 @@ pub enum EventKind {
         character_id: CharacterId,
         code: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct PublicInvite {
+    pub id: String,
+    pub from_character_id: CharacterId,
+    pub to_character_id: CharacterId,
+    pub action: String,
+    pub target_id: EntityId,
+    pub message: String,
+    pub status: InviteStatus,
+    pub created_at_tick: Tick,
+    pub responded_at_tick: Option<Tick>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct PublicNotice {
+    pub id: String,
+    pub board_id: EntityId,
+    pub author_id: CharacterId,
+    pub text: String,
+    pub created_at_tick: Tick,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ExternalGame {
+    pub id: String,
+    pub board_id: EntityId,
+    pub participant_ids: Vec<CharacterId>,
+    pub provider: String,
+    pub external_game_id: String,
+    pub url: String,
+    pub status: ExternalGameStatus,
+    pub started_at_tick: Tick,
+    pub last_reported_tick: Tick,
+    pub result: Option<String>,
+    pub reported_by: Option<CharacterId>,
+    #[serde(default)]
+    pub confirmations: Vec<CharacterId>,
+    #[serde(default)]
+    pub disputed_by: Vec<CharacterId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalGameStatus {
+    Registered,
+    ResultReported,
+    Confirmed,
+    Disputed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]

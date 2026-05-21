@@ -1,13 +1,15 @@
 use fishtank_protocol::{
     ActionView, Activity, ActivityKind, ActivityStatus, AgentActorView, AgentInteractionSummary,
-    AgentMemoryHints, AgentObservation, AgentPromiseView, AgentWakeLimits, ApiError, Character,
-    CharacterId, CharacterStatus, Command, CommandEnvelope, CommandResponse, CommandResult,
-    Conversation, ConversationId, Direction, EntityId, EntityView, Event, EventId, EventKind,
-    FacingDirection, GridPosition, GridSize, GroundType, HomeAction, HomeManual,
-    LocationDefinition, LocationId, LocationView, MAX_ACTIONS_PER_WAKE, MoveMode, NearbyAgentView,
-    Notification, NotificationAction, OFFLINE_RETURN_HOME_TICKS, Observation, PreconditionKind,
-    Promise, QueueableCommand, QueuedCommand, SCHEMA_VERSION, ServiceDefinition, SpeechMessage,
-    SpeechTarget, TICKS_PER_INGAME_DAY, Tick, WorldDefinition, WorldSnapshot, WorldTime,
+    AgentMemoryHints, AgentObservation, AgentPromiseView, AgentRecommendedAction, AgentWakeLimits,
+    ApiError, Character, CharacterId, CharacterStatus, ChessCommand, Command, CommandEnvelope,
+    CommandResponse, CommandResult, Conversation, ConversationId, Direction, EntityId, EntityView,
+    Event, EventId, EventKind, ExternalGame, ExternalGameStatus, FacingDirection, GridPosition,
+    GridSize, GroundType, HomeAction, HomeManual, InviteStatus, LocationDefinition, LocationId,
+    LocationView, MAX_ACTIONS_PER_WAKE, MoveMode, NearbyAgentView, Notification,
+    NotificationAction, OFFLINE_RETURN_HOME_TICKS, Observation, PreconditionKind, Promise,
+    PublicInteractableDefinition, PublicInvite, PublicNotice, QueueableCommand, QueuedCommand,
+    SCHEMA_VERSION, ServiceDefinition, SpeechMessage, SpeechTarget, TICKS_PER_INGAME_DAY, Tick,
+    WorldDefinition, WorldSnapshot, WorldTime,
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -74,6 +76,9 @@ impl Engine {
                 home_locks,
                 conversations: BTreeMap::new(),
                 notifications: BTreeMap::new(),
+                public_invites: BTreeMap::new(),
+                public_notices: BTreeMap::new(),
+                external_games: BTreeMap::new(),
                 command_log: Vec::new(),
             },
             events: Vec::new(),
@@ -240,6 +245,7 @@ impl Engine {
         let nearby_agents = self.nearby_agent_views(&actor);
         let recent_relevant_events = self.recent_relevant_events(&actor);
         let open_promises = self.open_promises(&actor);
+        let recommended_actions = self.recommended_actions(&actor, &nearby_agents, &open_promises);
         let memory_hints = self.agent_memory_hints(&actor, &nearby_agents, &recent_relevant_events);
         Ok(AgentObservation {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -261,6 +267,7 @@ impl Engine {
             notifications: observation.notifications,
             open_promises,
             available_affordances: observation.available_actions,
+            recommended_actions,
             memory_hints,
             limits: AgentWakeLimits {
                 max_actions_this_wake: MAX_ACTIONS_PER_WAKE,
@@ -300,6 +307,83 @@ impl Engine {
             }
             Command::Say { target, text } => {
                 let result = self.say(&envelope.character_id, target, text)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::ReplyTo {
+                target_event_id,
+                target,
+                text,
+            } => {
+                let result =
+                    self.reply_to(&envelope.character_id, target_event_id, target, text)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::Ask {
+                target_character_id,
+                text,
+            } => {
+                let result = self.ask(&envelope.character_id, &target_character_id, text)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::Invite {
+                target_character_id,
+                action,
+                target_id,
+                message,
+            } => {
+                let result = self.invite(
+                    &envelope.character_id,
+                    &target_character_id,
+                    &action,
+                    &target_id,
+                    message,
+                )?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::RespondInvite { invite_id, accept } => {
+                let result = self.respond_invite(&envelope.character_id, &invite_id, accept)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::JoinActivity { activity_id } => {
+                let result = self.join_activity(&envelope.character_id, &activity_id)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::Follow {
+                target_character_id,
+            } => {
+                let result = self.invite(
+                    &envelope.character_id,
+                    &target_character_id,
+                    "follow",
+                    &target_character_id,
+                    "Can I follow you for a bit?".to_string(),
+                )?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::WalkWith {
+                target_character_id,
+                destination_id,
+            } => {
+                let result = self.invite(
+                    &envelope.character_id,
+                    &target_character_id,
+                    "walk_with",
+                    &destination_id,
+                    format!("Want to walk with me to {destination_id}?"),
+                )?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::UseInteractable {
+                target_id,
+                action,
+                args,
+            } => {
+                let result =
+                    self.use_interactable(&envelope.character_id, &target_id, &action, args)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
+            Command::Chess { action } => {
+                let result = self.chess_action(&envelope.character_id, action)?;
                 Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
             }
             Command::Order { service_id, item } => {
@@ -458,6 +542,24 @@ impl Engine {
                 .activity_site(&entity.id)
                 .map(|site| site.description.clone())
                 .unwrap_or_else(|_| entity.name.clone()),
+            "public_interactable" => self
+                .interactable(&entity.id)
+                .map(|interactable| {
+                    let mut description = interactable.description.clone();
+                    if !interactable.public_state.is_empty() {
+                        description.push_str(" Public state: ");
+                        description.push_str(
+                            &interactable
+                                .public_state
+                                .iter()
+                                .map(|(key, value)| format!("{key}={value}"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        );
+                    }
+                    description
+                })
+                .unwrap_or_else(|_| entity.name.clone()),
             "location" => self
                 .location(&entity.id)
                 .map(|location| location.description.clone())
@@ -592,6 +694,325 @@ impl Engine {
             );
         }
         Ok(CommandResult::MessageSpoken { conversation_id })
+    }
+
+    fn reply_to(
+        &mut self,
+        character_id: &str,
+        target_event_id: EventId,
+        target: SpeechTarget,
+        text: String,
+    ) -> Result<CommandResult, ApiError> {
+        if !self.events.iter().any(|event| event.id == target_event_id) {
+            return Err(api_error(
+                "unknown_reply_target",
+                "The referenced event is not in recent world history.",
+            ));
+        }
+        let actor = self.require_character(character_id)?.clone();
+        let result = self.say(character_id, target.clone(), text.clone())?;
+        let conversation_id = match result {
+            CommandResult::MessageSpoken { conversation_id } => conversation_id,
+            _ => conversation_id_for(&actor.location_id),
+        };
+        self.record(EventKind::ReplySpoken {
+            conversation_id: conversation_id.clone(),
+            speaker_id: character_id.to_string(),
+            target_event_id,
+            target,
+            text,
+        });
+        Ok(CommandResult::MessageSpoken { conversation_id })
+    }
+
+    fn ask(
+        &mut self,
+        character_id: &str,
+        target_character_id: &str,
+        text: String,
+    ) -> Result<CommandResult, ApiError> {
+        self.say(
+            character_id,
+            SpeechTarget::Character(target_character_id.to_string()),
+            format!("Question: {text}"),
+        )
+    }
+
+    fn invite(
+        &mut self,
+        character_id: &str,
+        target_character_id: &str,
+        action: &str,
+        target_id: &str,
+        message: String,
+    ) -> Result<CommandResult, ApiError> {
+        let actor = self.require_character(character_id)?.clone();
+        let target = self.require_character(target_character_id)?.clone();
+        if actor.location_id != target.location_id {
+            return Err(api_error(
+                "target_not_nearby",
+                "Invites require the target character to be nearby in v1.",
+            ));
+        }
+        if !self.is_visible_to(&actor, target_id) && self.interactable(target_id).is_err() {
+            return Err(api_error(
+                "invite_target_not_visible",
+                "The invite target is not visible or usable from here.",
+            ));
+        }
+        let invite_id = format!(
+            "invite.{}.{}",
+            self.state.tick,
+            self.state.public_invites.len() + 1
+        );
+        let invite = PublicInvite {
+            id: invite_id.clone(),
+            from_character_id: character_id.to_string(),
+            to_character_id: target_character_id.to_string(),
+            action: action.to_string(),
+            target_id: target_id.to_string(),
+            message,
+            status: InviteStatus::Pending,
+            created_at_tick: self.state.tick,
+            responded_at_tick: None,
+        };
+        self.state
+            .public_invites
+            .insert(invite_id.clone(), invite.clone());
+        self.record(EventKind::InviteCreated {
+            invite_id: invite_id.clone(),
+            from_character_id: character_id.to_string(),
+            to_character_id: target_character_id.to_string(),
+            action: action.to_string(),
+            target_id: target_id.to_string(),
+        });
+        let notification_kind = if action.contains("chess") {
+            "chess_invite"
+        } else {
+            "invite_received"
+        };
+        self.create_notification(
+            target_character_id,
+            notification_kind,
+            &format!("{} invited you to {}.", actor.name, action),
+            [
+                ("invite_id".to_string(), invite_id.clone()),
+                ("from_character_id".to_string(), character_id.to_string()),
+                ("target_id".to_string(), target_id.to_string()),
+            ],
+        );
+        Ok(CommandResult::SocialUpdated {
+            kind: "invite_created".to_string(),
+            id: invite_id,
+            summary: format!("Invite sent to {}.", target.name),
+        })
+    }
+
+    fn respond_invite(
+        &mut self,
+        character_id: &str,
+        invite_id: &str,
+        accept: bool,
+    ) -> Result<CommandResult, ApiError> {
+        let invite = self
+            .state
+            .public_invites
+            .get_mut(invite_id)
+            .ok_or_else(|| api_error("unknown_invite", "The invite does not exist."))?;
+        if invite.to_character_id != character_id {
+            return Err(api_error(
+                "invite_not_owned",
+                "Only the invited character can respond to this invite.",
+            ));
+        }
+        if invite.status != InviteStatus::Pending {
+            return Err(api_error(
+                "invite_already_resolved",
+                "This invite has already been accepted or declined.",
+            ));
+        }
+        invite.status = if accept {
+            InviteStatus::Accepted
+        } else {
+            InviteStatus::Declined
+        };
+        invite.responded_at_tick = Some(self.state.tick);
+        let from_character_id = invite.from_character_id.clone();
+        let action = invite.action.clone();
+        let target_id = invite.target_id.clone();
+        self.record(EventKind::InviteResponded {
+            invite_id: invite_id.to_string(),
+            responder_id: character_id.to_string(),
+            accepted: accept,
+        });
+        self.create_notification(
+            &from_character_id,
+            if accept {
+                "invite_accepted"
+            } else {
+                "invite_declined"
+            },
+            if accept {
+                "Your invite was accepted."
+            } else {
+                "Your invite was declined."
+            },
+            [
+                ("invite_id".to_string(), invite_id.to_string()),
+                ("responder_id".to_string(), character_id.to_string()),
+                ("target_id".to_string(), target_id.clone()),
+            ],
+        );
+        if accept && action.contains("chess") && self.interactable(&target_id).is_ok() {
+            self.reserve_chess_board(&from_character_id, character_id, &target_id)?;
+        }
+        Ok(CommandResult::SocialUpdated {
+            kind: if accept {
+                "invite_accepted".to_string()
+            } else {
+                "invite_declined".to_string()
+            },
+            id: invite_id.to_string(),
+            summary: "Invite response recorded.".to_string(),
+        })
+    }
+
+    fn join_activity(
+        &mut self,
+        character_id: &str,
+        activity_id: &str,
+    ) -> Result<CommandResult, ApiError> {
+        let activity = self
+            .state
+            .characters
+            .values()
+            .find_map(|character| {
+                character.current_activity.as_ref().and_then(|activity| {
+                    (activity.id == activity_id).then_some((character.id.clone(), activity.clone()))
+                })
+            })
+            .ok_or_else(|| {
+                api_error("unknown_activity", "The activity is not currently active.")
+            })?;
+        let actor = self.require_character(character_id)?.clone();
+        let leader = self.require_character(&activity.0)?.clone();
+        if actor.location_id != leader.location_id {
+            return Err(api_error(
+                "activity_not_nearby",
+                "The activity is not happening nearby.",
+            ));
+        }
+        let site_id = activity
+            .1
+            .target_id
+            .ok_or_else(|| api_error("activity_not_joinable", "This activity cannot be joined."))?;
+        self.start_activity_site(character_id, &site_id)
+    }
+
+    fn use_interactable(
+        &mut self,
+        character_id: &str,
+        target_id: &str,
+        action: &str,
+        args: BTreeMap<String, String>,
+    ) -> Result<CommandResult, ApiError> {
+        let actor = self.require_character(character_id)?.clone();
+        let interactable = self.interactable(target_id)?.clone();
+        if interactable.location_id != actor.location_id {
+            return Err(api_error(
+                "interactable_not_nearby",
+                "The requested public object is not available at this location.",
+            ));
+        }
+        if !interactable
+            .actions
+            .iter()
+            .any(|candidate| candidate == action)
+        {
+            return Err(api_error(
+                "action_unavailable",
+                "That action is not available on this public object.",
+            ));
+        }
+        match action {
+            "post_notice" => {
+                let text = args
+                    .get("text")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    .trim();
+                if text.is_empty() {
+                    return Err(api_error("empty_notice", "A notice needs text."));
+                }
+                let notice_id = format!(
+                    "notice.{}.{}",
+                    self.state.tick,
+                    self.state.public_notices.len() + 1
+                );
+                self.state.public_notices.insert(
+                    notice_id.clone(),
+                    PublicNotice {
+                        id: notice_id.clone(),
+                        board_id: target_id.to_string(),
+                        author_id: character_id.to_string(),
+                        text: text.to_string(),
+                        created_at_tick: self.state.tick,
+                    },
+                );
+                self.record(EventKind::PublicNoticePosted {
+                    notice_id: notice_id.clone(),
+                    board_id: target_id.to_string(),
+                    author_id: character_id.to_string(),
+                });
+                self.notify_location_except(
+                    character_id,
+                    &actor.location_id,
+                    "notice_posted",
+                    "A new public notice was posted nearby.",
+                    [
+                        ("notice_id".to_string(), notice_id.clone()),
+                        ("board_id".to_string(), target_id.to_string()),
+                    ],
+                );
+                Ok(CommandResult::InteractableUpdated {
+                    interactable_id: target_id.to_string(),
+                    action: action.to_string(),
+                    summary: "Notice posted.".to_string(),
+                })
+            }
+            "reserve_board" => {
+                let game = self.reserve_chess_board(character_id, character_id, target_id)?;
+                Ok(CommandResult::ChessUpdated { games: vec![game] })
+            }
+            "view_game" => Ok(CommandResult::ChessUpdated {
+                games: self.games_for_board(target_id),
+            }),
+            _ if interactable.duration_ticks > 0 => {
+                self.start_interactable_activity(character_id, &interactable)
+            }
+            _ => {
+                self.record(EventKind::PublicInteractableUsed {
+                    interactable_id: target_id.to_string(),
+                    character_id: character_id.to_string(),
+                    action: action.to_string(),
+                });
+                self.notify_location_except(
+                    character_id,
+                    &actor.location_id,
+                    "interactable_updated",
+                    "A nearby public object was used.",
+                    [
+                        ("interactable_id".to_string(), target_id.to_string()),
+                        ("action".to_string(), action.to_string()),
+                    ],
+                );
+                Ok(CommandResult::InteractableUpdated {
+                    interactable_id: target_id.to_string(),
+                    action: action.to_string(),
+                    summary: "Public object used.".to_string(),
+                })
+            }
+        }
     }
 
     fn start_order(
@@ -746,6 +1167,278 @@ impl Engine {
             movement_path: Vec::new(),
             promise: None,
         })
+    }
+
+    fn start_interactable_activity(
+        &mut self,
+        character_id: &str,
+        interactable: &PublicInteractableDefinition,
+    ) -> Result<CommandResult, ApiError> {
+        self.ensure_can_start_activity(character_id, false)?;
+        let actor = self.require_character(character_id)?.clone();
+        if interactable.price_coins > 0
+            && actor.coins.saturating_sub(actor.reserved_coins) < interactable.price_coins
+        {
+            return Err(api_error(
+                "insufficient_coins",
+                "The character does not have enough unreserved coins.",
+            ));
+        }
+        if interactable.reward_coins > 0 && actor.coins >= self.state.world.max_coins {
+            return Err(api_error(
+                "coin_cap_reached",
+                "The character cannot earn more coins right now.",
+            ));
+        }
+        if interactable.price_coins > 0 {
+            self.require_character_mut(character_id)?.reserved_coins += interactable.price_coins;
+            self.record(EventKind::CoinsReserved {
+                character_id: character_id.to_string(),
+                amount: interactable.price_coins,
+            });
+        }
+        let activity_id = self.next_activity_id("interactable");
+        let started_at_tick = self.state.tick;
+        let completes_at_tick = started_at_tick + interactable.duration_ticks;
+        let description = format!("{character_id} uses {}.", interactable.name);
+        {
+            let actor = self.require_character_mut(character_id)?;
+            actor.current_activity = Some(Activity {
+                id: activity_id.clone(),
+                kind: ActivityKind::Performing,
+                status: ActivityStatus::Active,
+                target_id: Some(interactable.id.clone()),
+                movement_path: Vec::new(),
+                started_at_tick,
+                completes_at_tick,
+                description: description.clone(),
+                promise_id: None,
+                reserved_coins: interactable.price_coins,
+                queued: false,
+            });
+            actor.status = CharacterStatus::Performing;
+        }
+        self.record(EventKind::ActivityStarted {
+            character_id: character_id.to_string(),
+            activity_id: activity_id.clone(),
+            description: description.clone(),
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
+        });
+        self.notify_location_except(
+            character_id,
+            &interactable.location_id,
+            "public_activity_started",
+            "A nearby public activity started.",
+            [
+                ("activity_id".to_string(), activity_id.clone()),
+                ("interactable_id".to_string(), interactable.id.clone()),
+            ],
+        );
+        Ok(CommandResult::ActivityStarted {
+            activity_id,
+            description,
+            estimated_ticks: interactable.duration_ticks,
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
+            promise: None,
+        })
+    }
+
+    fn chess_action(
+        &mut self,
+        character_id: &str,
+        action: ChessCommand,
+    ) -> Result<CommandResult, ApiError> {
+        self.require_character(character_id)?;
+        match action {
+            ChessCommand::Status { board_id } => {
+                let games = board_id
+                    .map(|board_id| self.games_for_board(&board_id))
+                    .unwrap_or_else(|| {
+                        self.state
+                            .external_games
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    });
+                Ok(CommandResult::ChessUpdated { games })
+            }
+            ChessCommand::RegisterExternalGame {
+                board_id,
+                opponent_character_id,
+                provider,
+                external_game_id,
+                url,
+            } => {
+                if provider != "lichess" {
+                    return Err(api_error(
+                        "unsupported_chess_provider",
+                        "Chess v1 only supports externally enforced Lichess games.",
+                    ));
+                }
+                let board = self.interactable(&board_id)?.clone();
+                if !board
+                    .actions
+                    .iter()
+                    .any(|action| action == "register_external_game")
+                {
+                    return Err(api_error(
+                        "not_a_chess_board",
+                        "This public object cannot register external chess games.",
+                    ));
+                }
+                let actor = self.require_character(character_id)?.clone();
+                let opponent = self.require_character(&opponent_character_id)?.clone();
+                if actor.location_id != board.location_id
+                    || opponent.location_id != board.location_id
+                {
+                    return Err(api_error(
+                        "players_not_at_board",
+                        "Both chess participants must be at the chess board location.",
+                    ));
+                }
+                if let Some(existing_id) = self
+                    .state
+                    .external_games
+                    .values()
+                    .find(|game| {
+                        game.board_id == board_id
+                            && game.status != ExternalGameStatus::Confirmed
+                            && game.external_game_id.is_empty()
+                            && game.participant_ids.iter().any(|id| id == character_id)
+                            && game
+                                .participant_ids
+                                .iter()
+                                .any(|id| id == &opponent_character_id)
+                    })
+                    .map(|game| game.id.clone())
+                {
+                    let tick = self.state.tick;
+                    let game = self.require_external_game_mut(&existing_id)?;
+                    game.provider = provider;
+                    game.external_game_id = external_game_id;
+                    game.url = url;
+                    game.last_reported_tick = tick;
+                    let game = game.clone();
+                    self.record(EventKind::ExternalGameRegistered {
+                        game_id: existing_id,
+                        board_id: board_id.clone(),
+                        provider: "lichess".to_string(),
+                    });
+                    return Ok(CommandResult::ChessUpdated { games: vec![game] });
+                }
+                if self.state.external_games.values().any(|game| {
+                    game.board_id == board_id && game.status != ExternalGameStatus::Confirmed
+                }) {
+                    return Err(api_error(
+                        "board_already_reserved",
+                        "This chess board already has an active external game.",
+                    ));
+                }
+                let game_id = format!(
+                    "game.{}.{}",
+                    self.state.tick,
+                    self.state.external_games.len() + 1
+                );
+                let game = ExternalGame {
+                    id: game_id.clone(),
+                    board_id: board_id.clone(),
+                    participant_ids: vec![character_id.to_string(), opponent_character_id],
+                    provider,
+                    external_game_id,
+                    url,
+                    status: ExternalGameStatus::Registered,
+                    started_at_tick: self.state.tick,
+                    last_reported_tick: self.state.tick,
+                    result: None,
+                    reported_by: None,
+                    confirmations: Vec::new(),
+                    disputed_by: Vec::new(),
+                };
+                self.state
+                    .external_games
+                    .insert(game_id.clone(), game.clone());
+                self.record(EventKind::ExternalGameRegistered {
+                    game_id: game_id.clone(),
+                    board_id: board_id.clone(),
+                    provider: "lichess".to_string(),
+                });
+                for participant_id in &game.participant_ids {
+                    if participant_id != character_id {
+                        self.create_notification(
+                            participant_id,
+                            "external_game_pending",
+                            "A Lichess game was registered for your chess board.",
+                            [
+                                ("game_id".to_string(), game_id.clone()),
+                                ("board_id".to_string(), board_id.clone()),
+                            ],
+                        );
+                    }
+                }
+                Ok(CommandResult::ChessUpdated { games: vec![game] })
+            }
+            ChessCommand::RecordResult { game_id, result } => {
+                let tick = self.state.tick;
+                let game = self.require_external_game_mut(&game_id)?;
+                if !game.participant_ids.iter().any(|id| id == character_id) {
+                    return Err(api_error(
+                        "not_game_participant",
+                        "Only participants can report this game result.",
+                    ));
+                }
+                game.status = ExternalGameStatus::ResultReported;
+                game.result = Some(result.clone());
+                game.reported_by = Some(character_id.to_string());
+                game.last_reported_tick = tick;
+                insert_unique(&mut game.confirmations, character_id.to_string());
+                let game = game.clone();
+                self.record(EventKind::ExternalGameResultReported {
+                    game_id: game_id.clone(),
+                    result,
+                    reporter_id: character_id.to_string(),
+                });
+                for participant_id in &game.participant_ids {
+                    if participant_id != character_id {
+                        self.create_notification(
+                            participant_id,
+                            "chess_game_update",
+                            "A Lichess result was reported for your chess game.",
+                            [("game_id".to_string(), game_id.clone())],
+                        );
+                    }
+                }
+                Ok(CommandResult::ChessUpdated { games: vec![game] })
+            }
+            ChessCommand::ConfirmResult { game_id, accept } => {
+                let game = self.require_external_game_mut(&game_id)?;
+                if !game.participant_ids.iter().any(|id| id == character_id) {
+                    return Err(api_error(
+                        "not_game_participant",
+                        "Only participants can confirm this game result.",
+                    ));
+                }
+                if accept {
+                    insert_unique(&mut game.confirmations, character_id.to_string());
+                    if game
+                        .participant_ids
+                        .iter()
+                        .all(|id| game.confirmations.iter().any(|confirmed| confirmed == id))
+                    {
+                        game.status = ExternalGameStatus::Confirmed;
+                    }
+                } else {
+                    insert_unique(&mut game.disputed_by, character_id.to_string());
+                    game.status = ExternalGameStatus::Disputed;
+                }
+                Ok(CommandResult::ChessUpdated {
+                    games: vec![game.clone()],
+                })
+            }
+        }
     }
 
     fn accept_queue(
@@ -1049,12 +1742,16 @@ impl Engine {
                     .status = CharacterStatus::Idle;
             }
             ActivityKind::Performing => {
-                let reward = activity
-                    .target_id
-                    .as_ref()
-                    .and_then(|site_id| self.activity_site(site_id).ok())
+                let target_id = activity.target_id.clone().unwrap_or_default();
+                let reward = self
+                    .activity_site(&target_id)
                     .map(|site| (site.id.clone(), site.coin_reward))
-                    .unwrap_or_else(|| (activity.target_id.clone().unwrap_or_default(), 0));
+                    .or_else(|_| {
+                        self.interactable(&target_id).map(|interactable| {
+                            (interactable.id.clone(), interactable.reward_coins)
+                        })
+                    })
+                    .unwrap_or_else(|_| (target_id.clone(), 0));
                 let earned = {
                     let actor = self
                         .state
@@ -1062,6 +1759,11 @@ impl Engine {
                         .get_mut(character_id)
                         .expect("character exists");
                     actor.status = CharacterStatus::Idle;
+                    if activity.reserved_coins > 0 {
+                        actor.reserved_coins =
+                            actor.reserved_coins.saturating_sub(activity.reserved_coins);
+                        actor.coins = actor.coins.saturating_sub(activity.reserved_coins);
+                    }
                     if reward.1 > 0 {
                         let before = actor.coins;
                         actor.coins = actor
@@ -1078,6 +1780,14 @@ impl Engine {
                         character_id: character_id.to_string(),
                         amount: earned,
                         source_id: reward.0.clone(),
+                    });
+                }
+                if activity.reserved_coins > 0 {
+                    self.record(EventKind::CoinsSpent {
+                        character_id: character_id.to_string(),
+                        amount: activity.reserved_coins,
+                        source_id: Some(reward.0.clone()),
+                        item: None,
                     });
                 }
                 self.create_notification(
@@ -1439,6 +2149,24 @@ impl Engine {
                 targets: activity_targets,
             });
         }
+        let interactable_targets = self
+            .state
+            .world
+            .interactables
+            .iter()
+            .filter(|interactable| interactable.location_id == actor.location_id)
+            .map(|interactable| interactable.id.clone())
+            .collect::<Vec<_>>();
+        if !interactable_targets.is_empty() {
+            actions.push(ActionView {
+                action: "use_interactable".to_string(),
+                targets: interactable_targets.clone(),
+            });
+            actions.push(ActionView {
+                action: "invite".to_string(),
+                targets: interactable_targets,
+            });
+        }
         Ok(actions)
     }
 
@@ -1487,6 +2215,25 @@ impl Engine {
                 available_actions: vec!["perform_activity".to_string(), "look_at".to_string()],
             });
 
+        let interactables = self
+            .state
+            .world
+            .interactables
+            .iter()
+            .filter(|interactable| interactable.location_id == actor_location_id)
+            .map(|interactable| EntityView {
+                id: interactable.id.clone(),
+                entity_type: "public_interactable".to_string(),
+                name: interactable.name.clone(),
+                distance: "near".to_string(),
+                available_actions: interactable
+                    .actions
+                    .iter()
+                    .cloned()
+                    .chain(["look_at".to_string()])
+                    .collect(),
+            });
+
         let exits = location.exits.iter().map(|exit| EntityView {
             id: exit.clone(),
             entity_type: "location".to_string(),
@@ -1501,6 +2248,7 @@ impl Engine {
         nearby_characters
             .chain(services)
             .chain(activity_sites)
+            .chain(interactables)
             .chain(exits)
             .collect()
     }
@@ -1564,6 +2312,15 @@ impl Engine {
             "activity_completed",
             "queue_failed",
             "queue_completed",
+            "chess_invite",
+            "invite_received",
+            "invite_accepted",
+            "invite_declined",
+            "notice_posted",
+            "public_activity_started",
+            "chess_game_update",
+            "external_game_pending",
+            "interactable_updated",
             "same_location_entry",
         ] {
             if notifications
@@ -1623,6 +2380,9 @@ impl Engine {
             }
             EventKind::MessageSpoken {
                 speaker_id, target, ..
+            }
+            | EventKind::ReplySpoken {
+                speaker_id, target, ..
             } => {
                 speaker_id == &actor.id
                     || matches!(target, SpeechTarget::Character(target_id) if target_id == &actor.id)
@@ -1639,6 +2399,46 @@ impl Engine {
             | EventKind::QueueStepStarted { character_id, .. }
             | EventKind::QueueStepFailed { character_id, .. }
             | EventKind::PromiseResolved { character_id, .. } => character_id == &actor.id,
+            EventKind::InviteCreated {
+                from_character_id,
+                to_character_id,
+                target_id,
+                ..
+            } => {
+                from_character_id == &actor.id
+                    || to_character_id == &actor.id
+                    || self
+                        .interactable(target_id)
+                        .is_ok_and(|target| target.location_id == actor.location_id)
+            }
+            EventKind::InviteResponded {
+                responder_id,
+                invite_id,
+                ..
+            } => {
+                responder_id == &actor.id
+                    || self
+                        .state
+                        .public_invites
+                        .get(invite_id)
+                        .is_some_and(|invite| {
+                            invite.from_character_id == actor.id
+                                || invite.to_character_id == actor.id
+                        })
+            }
+            EventKind::PublicNoticePosted { board_id, .. }
+            | EventKind::PublicInteractableUsed {
+                interactable_id: board_id,
+                ..
+            } => self
+                .interactable(board_id)
+                .is_ok_and(|interactable| interactable.location_id == actor.location_id),
+            EventKind::ExternalGameRegistered { game_id, .. }
+            | EventKind::ExternalGameResultReported { game_id, .. } => self
+                .state
+                .external_games
+                .get(game_id)
+                .is_some_and(|game| game.participant_ids.iter().any(|id| id == &actor.id)),
             EventKind::PromiseCreated { promise } => actor
                 .current_activity
                 .as_ref()
@@ -1672,6 +2472,113 @@ impl Engine {
             .collect()
     }
 
+    fn recommended_actions(
+        &self,
+        actor: &Character,
+        nearby_agents: &[NearbyAgentView],
+        open_promises: &[AgentPromiseView],
+    ) -> Vec<AgentRecommendedAction> {
+        let mut recommendations = Vec::new();
+        if !open_promises.is_empty() {
+            recommendations.push(AgentRecommendedAction {
+                reason: "promise_ready".to_string(),
+                action: "observe".to_string(),
+                target: open_promises
+                    .first()
+                    .map(|promise| promise.activity_id.clone()),
+                summary: "A promised activity has a handle worth checking.".to_string(),
+            });
+        }
+        if actor.coins <= 2 {
+            if let Some(job) = self
+                .state
+                .world
+                .activity_sites
+                .iter()
+                .find(|site| site.coin_reward > 0)
+            {
+                recommendations.push(AgentRecommendedAction {
+                    reason: "low_coins".to_string(),
+                    action: "perform_activity".to_string(),
+                    target: Some(job.id.clone()),
+                    summary: "Coins are low; a paid activity exists in the world.".to_string(),
+                });
+            }
+            if let Some(job) = self
+                .state
+                .world
+                .interactables
+                .iter()
+                .find(|interactable| interactable.reward_coins > 0)
+            {
+                recommendations.push(AgentRecommendedAction {
+                    reason: "job_available".to_string(),
+                    action: "use_interactable".to_string(),
+                    target: Some(job.id.clone()),
+                    summary: "A public errand can earn coins.".to_string(),
+                });
+            }
+        }
+        for invite in self
+            .state
+            .public_invites
+            .values()
+            .filter(|invite| {
+                invite.to_character_id == actor.id && invite.status == InviteStatus::Pending
+            })
+            .take(2)
+        {
+            recommendations.push(AgentRecommendedAction {
+                reason: if invite.action.contains("chess") {
+                    "chess_invite".to_string()
+                } else {
+                    "pending_invite".to_string()
+                },
+                action: "respond_invite".to_string(),
+                target: Some(invite.target_id.clone()),
+                summary: format!(
+                    "{} invited you to {}.",
+                    invite.from_character_id, invite.action
+                ),
+            });
+        }
+        if let Some(agent) = nearby_agents
+            .iter()
+            .find(|agent| agent.status == CharacterStatus::Idle)
+        {
+            recommendations.push(AgentRecommendedAction {
+                reason: "nearby_agent_idle".to_string(),
+                action: "say".to_string(),
+                target: Some(agent.id.clone()),
+                summary: "A nearby agent is idle and available for social follow-up.".to_string(),
+            });
+        }
+        if let Some(interactable) = self
+            .state
+            .world
+            .interactables
+            .iter()
+            .find(|interactable| interactable.location_id == actor.location_id)
+        {
+            recommendations.push(AgentRecommendedAction {
+                reason: if interactable
+                    .actions
+                    .iter()
+                    .any(|action| action == "post_notice")
+                {
+                    "notice_unread".to_string()
+                } else {
+                    "social_opportunity".to_string()
+                },
+                action: "use_interactable".to_string(),
+                target: Some(interactable.id.clone()),
+                summary: format!("{} is available here.", interactable.name),
+            });
+        }
+        recommendations.truncate(5);
+        recommendations
+    }
+
     fn agent_memory_hints(
         &self,
         actor: &Character,
@@ -1698,43 +2605,99 @@ impl Engine {
         stable_ids.sort();
         stable_ids.dedup();
 
-        let recent_interactions = recent_events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::MessageSpoken {
-                    speaker_id,
-                    target,
-                    text,
-                    ..
-                } if speaker_id == &actor.id => {
-                    let with = match target {
-                        SpeechTarget::Character(target_id) => target_id.clone(),
-                        _ => speaker_id.clone(),
-                    };
-                    Some(AgentInteractionSummary {
-                        with,
-                        summary: format!("You said: {text}"),
+        let recent_interactions =
+            recent_events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::MessageSpoken {
+                        speaker_id,
+                        target,
+                        text,
+                        ..
+                    } if speaker_id == &actor.id => {
+                        let with = match target {
+                            SpeechTarget::Character(target_id) => target_id.clone(),
+                            _ => speaker_id.clone(),
+                        };
+                        Some(AgentInteractionSummary {
+                            with,
+                            summary: format!("You said: {text}"),
+                            last_seen_tick: event.tick,
+                            last_spoke_tick: Some(event.tick),
+                            last_shared_activity_tick: None,
+                            pending_invite_id: None,
+                            unanswered_directed_speech: false,
+                            recent_event_ids: vec![event.id],
+                        })
+                    }
+                    EventKind::MessageSpoken {
+                        speaker_id, text, ..
+                    } => Some(AgentInteractionSummary {
+                        with: speaker_id.clone(),
+                        summary: format!("{speaker_id} said: {text}"),
                         last_seen_tick: event.tick,
-                    })
-                }
-                EventKind::MessageSpoken {
-                    speaker_id, text, ..
-                } => Some(AgentInteractionSummary {
-                    with: speaker_id.clone(),
-                    summary: format!("{speaker_id} said: {text}"),
-                    last_seen_tick: event.tick,
-                }),
-                EventKind::CharacterMoved {
-                    character_id, to, ..
-                } if character_id != &actor.id => Some(AgentInteractionSummary {
-                    with: character_id.clone(),
-                    summary: format!("{character_id} arrived at {to}."),
-                    last_seen_tick: event.tick,
-                }),
-                _ => None,
-            })
-            .take(8)
-            .collect();
+                        last_spoke_tick: Some(event.tick),
+                        last_shared_activity_tick: None,
+                        pending_invite_id: self.pending_invite_between(&actor.id, speaker_id),
+                        unanswered_directed_speech: true,
+                        recent_event_ids: vec![event.id],
+                    }),
+                    EventKind::CharacterMoved {
+                        character_id, to, ..
+                    } if character_id != &actor.id => Some(AgentInteractionSummary {
+                        with: character_id.clone(),
+                        summary: format!("{character_id} arrived at {to}."),
+                        last_seen_tick: event.tick,
+                        last_spoke_tick: None,
+                        last_shared_activity_tick: None,
+                        pending_invite_id: self.pending_invite_between(&actor.id, character_id),
+                        unanswered_directed_speech: false,
+                        recent_event_ids: vec![event.id],
+                    }),
+                    EventKind::InviteCreated {
+                        invite_id,
+                        from_character_id,
+                        to_character_id,
+                        action,
+                        ..
+                    } if from_character_id == &actor.id || to_character_id == &actor.id => {
+                        let with = if from_character_id == &actor.id {
+                            to_character_id.clone()
+                        } else {
+                            from_character_id.clone()
+                        };
+                        Some(AgentInteractionSummary {
+                            with,
+                            summary: format!("Pending invite: {action}."),
+                            last_seen_tick: event.tick,
+                            last_spoke_tick: None,
+                            last_shared_activity_tick: None,
+                            pending_invite_id: Some(invite_id.clone()),
+                            unanswered_directed_speech: false,
+                            recent_event_ids: vec![event.id],
+                        })
+                    }
+                    EventKind::ActivityStarted { character_id, .. }
+                        if character_id != &actor.id
+                            && self.state.characters.get(character_id).is_some_and(
+                                |character| character.location_id == actor.location_id,
+                            ) =>
+                    {
+                        Some(AgentInteractionSummary {
+                            with: character_id.clone(),
+                            summary: "Nearby agent started an activity.".to_string(),
+                            last_seen_tick: event.tick,
+                            last_spoke_tick: None,
+                            last_shared_activity_tick: Some(event.tick),
+                            pending_invite_id: self.pending_invite_between(&actor.id, character_id),
+                            unanswered_directed_speech: false,
+                            recent_event_ids: vec![event.id],
+                        })
+                    }
+                    _ => None,
+                })
+                .take(8)
+                .collect();
 
         AgentMemoryHints {
             stable_ids,
@@ -1776,6 +2739,107 @@ impl Engine {
                 ],
             );
         }
+    }
+
+    fn notify_location_except<const N: usize>(
+        &mut self,
+        actor_id: &str,
+        location_id: &str,
+        kind: &str,
+        summary: &str,
+        related: [(String, String); N],
+    ) {
+        let recipients = self
+            .state
+            .characters
+            .values()
+            .filter(|character| character.id != actor_id && character.location_id == location_id)
+            .map(|character| character.id.clone())
+            .collect::<Vec<_>>();
+        let related = BTreeMap::from(related);
+        for recipient in recipients {
+            self.create_notification_from_map(&recipient, kind, summary, related.clone());
+        }
+    }
+
+    fn reserve_chess_board(
+        &mut self,
+        actor_id: &str,
+        opponent_id: &str,
+        board_id: &str,
+    ) -> Result<ExternalGame, ApiError> {
+        let board = self.interactable(board_id)?.clone();
+        if !board.actions.iter().any(|action| action == "reserve_board") {
+            return Err(api_error(
+                "not_a_chess_board",
+                "This public object cannot be reserved as a chess board.",
+            ));
+        }
+        if self
+            .state
+            .external_games
+            .values()
+            .any(|game| game.board_id == board_id && game.status != ExternalGameStatus::Confirmed)
+        {
+            return Err(api_error(
+                "board_already_reserved",
+                "This chess board already has an active external game.",
+            ));
+        }
+        let game_id = format!(
+            "game.{}.{}",
+            self.state.tick,
+            self.state.external_games.len() + 1
+        );
+        let mut participants = vec![actor_id.to_string()];
+        insert_unique(&mut participants, opponent_id.to_string());
+        let game = ExternalGame {
+            id: game_id.clone(),
+            board_id: board_id.to_string(),
+            participant_ids: participants,
+            provider: "lichess".to_string(),
+            external_game_id: String::new(),
+            url: String::new(),
+            status: ExternalGameStatus::Registered,
+            started_at_tick: self.state.tick,
+            last_reported_tick: self.state.tick,
+            result: None,
+            reported_by: None,
+            confirmations: Vec::new(),
+            disputed_by: Vec::new(),
+        };
+        self.state
+            .external_games
+            .insert(game_id.clone(), game.clone());
+        self.record(EventKind::ExternalGameRegistered {
+            game_id,
+            board_id: board_id.to_string(),
+            provider: "lichess".to_string(),
+        });
+        Ok(game)
+    }
+
+    fn games_for_board(&self, board_id: &str) -> Vec<ExternalGame> {
+        self.state
+            .external_games
+            .values()
+            .filter(|game| game.board_id == board_id)
+            .cloned()
+            .collect()
+    }
+
+    fn pending_invite_between(&self, actor_id: &str, other_id: &str) -> Option<String> {
+        self.state
+            .public_invites
+            .values()
+            .find(|invite| {
+                invite.status == InviteStatus::Pending
+                    && ((invite.from_character_id == actor_id
+                        && invite.to_character_id == other_id)
+                        || (invite.from_character_id == other_id
+                            && invite.to_character_id == actor_id))
+            })
+            .map(|invite| invite.id.clone())
     }
 
     pub fn ensure_growth_capacity(&mut self) {
@@ -2053,6 +3117,16 @@ impl Engine {
         summary: &str,
         related: [(String, String); N],
     ) {
+        self.create_notification_from_map(character_id, kind, summary, BTreeMap::from(related));
+    }
+
+    fn create_notification_from_map(
+        &mut self,
+        character_id: &str,
+        kind: &str,
+        summary: &str,
+        related: BTreeMap<String, String>,
+    ) {
         let notification_id = format!(
             "notif.{}.{}",
             self.state.tick,
@@ -2069,7 +3143,7 @@ impl Engine {
                 expires_at_tick: self.state.tick + DEFAULT_NOTIFICATION_TTL_TICKS,
                 summary: summary.to_string(),
                 acknowledged: false,
-                related: BTreeMap::from(related),
+                related,
             },
         );
     }
@@ -2171,6 +3245,30 @@ impl Engine {
             .iter()
             .find(|service| service.id == service_id)
             .ok_or_else(|| api_error("unknown_service", "The requested service does not exist."))
+    }
+
+    fn interactable(
+        &self,
+        interactable_id: &str,
+    ) -> Result<&PublicInteractableDefinition, ApiError> {
+        self.state
+            .world
+            .interactables
+            .iter()
+            .find(|interactable| interactable.id == interactable_id)
+            .ok_or_else(|| {
+                api_error(
+                    "unknown_interactable",
+                    "The requested public interactable does not exist.",
+                )
+            })
+    }
+
+    fn require_external_game_mut(&mut self, game_id: &str) -> Result<&mut ExternalGame, ApiError> {
+        self.state
+            .external_games
+            .get_mut(game_id)
+            .ok_or_else(|| api_error("unknown_external_game", "The external game does not exist."))
     }
 
     fn activity_site(
@@ -2334,6 +3432,21 @@ fn validate_world(world: &WorldDefinition) -> Result<(), CoreError> {
             ));
         }
     }
+    for interactable in &world.interactables {
+        if !world
+            .locations
+            .iter()
+            .any(|location| location.id == interactable.location_id)
+        {
+            return Err(CoreError::MissingServiceLocation(
+                interactable.id.clone(),
+                interactable.location_id.clone(),
+            ));
+        }
+        if interactable.actions.is_empty() {
+            return Err(CoreError::InvalidLocationFootprint(interactable.id.clone()));
+        }
+    }
     Ok(())
 }
 
@@ -2395,6 +3508,18 @@ fn merge_world_definition(target: &mut WorldDefinition, source: WorldDefinition)
             *existing = site;
         } else {
             target.activity_sites.push(site);
+        }
+    }
+
+    for interactable in source.interactables {
+        if let Some(existing) = target
+            .interactables
+            .iter_mut()
+            .find(|candidate| candidate.id == interactable.id)
+        {
+            *existing = interactable;
+        } else {
+            target.interactables.push(interactable);
         }
     }
 }
@@ -3616,6 +4741,216 @@ mod tests {
         assert_eq!(
             observation.conversations[0].recent_messages[0].text,
             "message 1"
+        );
+    }
+
+    #[test]
+    fn social_invites_replies_and_life_wake_recommendations_are_factual() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        create(&mut engine, "char_ren", "Ren");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_ren", "village.main_street");
+        move_to(&mut engine, "char_mira", "village.park");
+        move_to(&mut engine, "char_ren", "village.park");
+
+        let invite = engine.apply(env(
+            "char_mira",
+            Command::Invite {
+                target_character_id: "char_ren".to_string(),
+                action: "invite_chess".to_string(),
+                target_id: "village.park.chess_board_1".to_string(),
+                message: "Chess?".to_string(),
+            },
+        ));
+        assert!(invite.ok, "{invite:?}");
+        assert!(
+            engine
+                .notifications_for("char_ren", false)
+                .iter()
+                .any(|notification| notification.kind == "chess_invite")
+        );
+        let ren_wake = engine.observe_agent("char_ren").unwrap();
+        assert_eq!(ren_wake.wake_reason, "chess_invite");
+        assert!(
+            ren_wake
+                .recommended_actions
+                .iter()
+                .any(|recommendation| recommendation.reason == "chess_invite")
+        );
+        assert!(
+            ren_wake
+                .memory_hints
+                .recent_interactions
+                .iter()
+                .any(|interaction| interaction.pending_invite_id.is_some())
+        );
+
+        let invite_id = engine.state.public_invites.keys().next().cloned().unwrap();
+        let accept = engine.apply(env(
+            "char_ren",
+            Command::RespondInvite {
+                invite_id: invite_id.clone(),
+                accept: true,
+            },
+        ));
+        assert!(accept.ok, "{accept:?}");
+        assert_eq!(
+            engine.state.public_invites[&invite_id].status,
+            InviteStatus::Accepted
+        );
+        assert_eq!(engine.state.external_games.len(), 1);
+        let reserved_game_id = engine.state.external_games.keys().next().cloned().unwrap();
+        let register_reserved = engine.apply(env(
+            "char_mira",
+            Command::Chess {
+                action: ChessCommand::RegisterExternalGame {
+                    board_id: "village.park.chess_board_1".to_string(),
+                    opponent_character_id: "char_ren".to_string(),
+                    provider: "lichess".to_string(),
+                    external_game_id: "invite123".to_string(),
+                    url: "https://lichess.org/invite123".to_string(),
+                },
+            },
+        ));
+        assert!(register_reserved.ok, "{register_reserved:?}");
+        assert_eq!(
+            engine.state.external_games[&reserved_game_id].external_game_id,
+            "invite123"
+        );
+
+        let target_event_id = engine
+            .events()
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::InviteCreated { .. }))
+            .unwrap()
+            .id;
+        let reply = engine.apply(env(
+            "char_ren",
+            Command::ReplyTo {
+                target_event_id,
+                target: SpeechTarget::Character("char_mira".to_string()),
+                text: "Accepted.".to_string(),
+            },
+        ));
+        assert!(reply.ok, "{reply:?}");
+        assert!(
+            engine
+                .events()
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::ReplySpoken { .. }))
+        );
+    }
+
+    #[test]
+    fn public_interactables_post_notices_and_pay_for_errands() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        create(&mut engine, "char_ren", "Ren");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_ren", "village.main_street");
+
+        let post = engine.apply(env(
+            "char_mira",
+            Command::UseInteractable {
+                target_id: "village.main_street.notice_board".to_string(),
+                action: "post_notice".to_string(),
+                args: BTreeMap::from([("text".to_string(), "Meet by the cafe.".to_string())]),
+            },
+        ));
+        assert!(post.ok, "{post:?}");
+        assert_eq!(engine.state.public_notices.len(), 1);
+        assert!(
+            engine
+                .notifications_for("char_ren", false)
+                .iter()
+                .any(|notification| notification.kind == "notice_posted")
+        );
+
+        engine.state.characters.get_mut("char_mira").unwrap().coins = 1;
+        let errand = engine.apply(env(
+            "char_mira",
+            Command::UseInteractable {
+                target_id: "village.main_street.job_board".to_string(),
+                action: "take_errand".to_string(),
+                args: BTreeMap::new(),
+            },
+        ));
+        assert!(errand.ok, "{errand:?}");
+        engine.advance_ticks(12);
+        assert_eq!(engine.state.characters["char_mira"].coins, 2);
+        assert!(engine
+            .events()
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::CoinsEarned { source_id, .. } if source_id == "village.main_street.job_board")));
+    }
+
+    #[test]
+    fn chess_registers_external_games_and_confirms_results_without_moves() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        create(&mut engine, "char_ren", "Ren");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_ren", "village.main_street");
+        move_to(&mut engine, "char_mira", "village.park");
+        move_to(&mut engine, "char_ren", "village.park");
+
+        let register = engine.apply(env(
+            "char_mira",
+            Command::Chess {
+                action: ChessCommand::RegisterExternalGame {
+                    board_id: "village.park.chess_board_1".to_string(),
+                    opponent_character_id: "char_ren".to_string(),
+                    provider: "lichess".to_string(),
+                    external_game_id: "abc123".to_string(),
+                    url: "https://lichess.org/abc123".to_string(),
+                },
+            },
+        ));
+        assert!(register.ok, "{register:?}");
+        let game_id = engine.state.external_games.keys().next().cloned().unwrap();
+        let game = &engine.state.external_games[&game_id];
+        assert_eq!(game.provider, "lichess");
+        assert!(game.result.is_none());
+        assert!(game.external_game_id == "abc123");
+
+        let duplicate = engine.apply(env(
+            "char_ren",
+            Command::Chess {
+                action: ChessCommand::RegisterExternalGame {
+                    board_id: "village.park.chess_board_1".to_string(),
+                    opponent_character_id: "char_mira".to_string(),
+                    provider: "lichess".to_string(),
+                    external_game_id: "def456".to_string(),
+                    url: "https://lichess.org/def456".to_string(),
+                },
+            },
+        ));
+        assert_eq!(duplicate.error.unwrap().code, "board_already_reserved");
+
+        let result = engine.apply(env(
+            "char_mira",
+            Command::Chess {
+                action: ChessCommand::RecordResult {
+                    game_id: game_id.clone(),
+                    result: "1-0".to_string(),
+                },
+            },
+        ));
+        assert!(result.ok, "{result:?}");
+        let confirm = engine.apply(env(
+            "char_ren",
+            Command::Chess {
+                action: ChessCommand::ConfirmResult {
+                    game_id: game_id.clone(),
+                    accept: true,
+                },
+            },
+        ));
+        assert!(confirm.ok, "{confirm:?}");
+        assert_eq!(
+            engine.state.external_games[&game_id].status,
+            ExternalGameStatus::Confirmed
         );
     }
 
