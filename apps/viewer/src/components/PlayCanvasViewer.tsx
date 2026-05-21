@@ -481,7 +481,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     for (const node of locationNodes) {
       const rig = buildLocation(node);
       rig.setPosition(node.position.x, 0, node.position.z);
-      if (node.kind === "home" || node.kind === "cafe") {
+      if (node.kind === "home" || node.kind === "cafe" || node.kind === "office") {
         rig.setEulerAngles(0, facingAngle(node.facing), 0);
       }
       root.addChild(rig);

@@ -151,6 +151,21 @@ export function useFishtank(): ViewerState {
         setConnected(true);
         setError(null);
         setLoading(false);
+        void getEvents(undefined, apiUrl)
+          .then((history) => {
+            if (disposed) return;
+            setEvents((current) => appendEvents(current, history));
+            const last = history[history.length - 1]?.id;
+            if (last != null) {
+              lastEventIdRef.current = last;
+              setLastEventId(last);
+            }
+          })
+          .catch((historyError) => {
+            if (!disposed) {
+              setError(historyError instanceof Error ? historyError.message : String(historyError));
+            }
+          });
         lastMessageAt = Date.now();
         clearLiveTimers();
         pingTimer = window.setInterval(() => {

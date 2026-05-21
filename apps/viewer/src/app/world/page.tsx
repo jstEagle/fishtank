@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { DevDrawer } from "@/components/DevControls";
 import {
   PlayCanvasViewer,
@@ -10,6 +11,7 @@ import {
 } from "@/components/PlayCanvasViewer";
 import { useFishtank } from "@/lib/use-fishtank";
 import type { Character, EventKind, EventRecord, WorldSnapshot } from "@/lib/protocol";
+import { characterLedger, locationEarnings } from "@/lib/social-summaries";
 
 export default function Home() {
   const { apiUrl, realtime, connected, loading, error, snapshot, events, refresh } = useFishtank();
@@ -93,6 +95,9 @@ export default function Home() {
         </div>
 
         <div className="chip-row top-right">
+          <Link className="chip nav-chip" href="/news">
+            News
+          </Link>
           {error ? (
             <div className="chip error-chip" title={error}>
               connection failed
@@ -166,6 +171,7 @@ export default function Home() {
           <CharacterInfoCard
             character={selectedCharacter}
             snapshot={snapshot}
+            events={events}
             x={selectedScreenPos.x}
             y={selectedScreenPos.y}
           />
@@ -183,15 +189,13 @@ export default function Home() {
           />
         ))}
 
-        {selectedLocation &&
-        hover &&
-        hover.kind === "location" &&
-        hover.id === selectedLocation.id ? (
+        {selectedLocation ? (
           <LocationInfoCard
-            name={selectedLocation.name}
-            description={selectedLocation.description}
-            x={hover.x}
-            y={hover.y}
+            locationId={selectedLocation.id}
+            snapshot={snapshot}
+            events={events}
+            x={hover?.kind === "location" && hover.id === selectedLocation.id ? hover.x : 260}
+            y={hover?.kind === "location" && hover.id === selectedLocation.id ? hover.y : 150}
           />
         ) : null}
       </div>
@@ -441,11 +445,13 @@ function describeEvent(
 function CharacterInfoCard({
   character,
   snapshot,
+  events,
   x,
   y
 }: {
   character: Character;
   snapshot: WorldSnapshot | null;
+  events: EventRecord[];
   x: number;
   y: number;
 }) {
@@ -455,6 +461,7 @@ function CharacterInfoCard({
     : character.location_id;
   const activity = character.current_activity;
   const status = character.status.replaceAll("_", " ");
+  const ledger = characterLedger(events, character.id, snapshot);
 
   return (
     <div className="info-card" style={{ left: x, top: y }}>
@@ -477,10 +484,33 @@ function CharacterInfoCard({
           {character.reserved_coins ? ` (${character.reserved_coins} held)` : ""}
         </strong>
       </div>
+      <div className="row">
+        <span>earned</span>
+        <strong>{ledger.earned}</strong>
+      </div>
+      <div className="row">
+        <span>spent</span>
+        <strong>{ledger.spent}</strong>
+      </div>
+      <div className="row">
+        <span>colors</span>
+        <strong>{character.body_color} / {character.face_color}</strong>
+      </div>
       {activity ? (
         <div className="quote">
           {activity.description ||
             `${activity.kind.replaceAll("_", " ")} → ${activity.target_id ?? ""}`}
+        </div>
+      ) : null}
+      {ledger.items.length ? (
+        <div className="mini-ledger">
+          {ledger.items.slice(0, 5).map((item) => (
+            <div key={item.id} className="mini-ledger-row">
+              <span>t{item.tick}</span>
+              <strong>{item.type === "spent" ? "-" : "+"}{item.amount}</strong>
+              <em>{item.label}</em>
+            </div>
+          ))}
         </div>
       ) : null}
     </div>
@@ -488,20 +518,38 @@ function CharacterInfoCard({
 }
 
 function LocationInfoCard({
-  name,
-  description,
+  locationId,
+  snapshot,
+  events,
   x,
   y
 }: {
-  name: string;
-  description: string;
+  locationId: string;
+  snapshot: WorldSnapshot | null;
+  events: EventRecord[];
   x: number;
   y: number;
 }) {
+  const location = snapshot?.world.locations.find((candidate) => candidate.id === locationId);
+  const earnings = locationEarnings(events, snapshot, locationId);
   return (
     <div className="info-card" style={{ left: x, top: y }}>
-      <h3>{name}</h3>
-      <div className="quote">{description}</div>
+      <h3>{location?.name ?? locationId}</h3>
+      <div className="quote">{location?.description ?? "Location details unavailable."}</div>
+      {earnings.length ? (
+        <div className="mini-ledger">
+          {earnings.map((entry) => (
+            <div key={entry.characterId} className="mini-ledger-row">
+              <span
+                className="live-feed-swatch"
+                style={{ background: entry.characterColor ?? "var(--ink-faint)" }}
+              />
+              <strong>{entry.characterName}</strong>
+              <em>{entry.amount} earned here</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

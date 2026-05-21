@@ -276,13 +276,17 @@ async fn load_or_seed_engine(
     world_path: &PathBuf,
     storage: &dyn Storage,
 ) -> Result<(Engine, bool)> {
-    if let Some(stored) = storage.load().await? {
-        return Ok((Engine::from_snapshot(stored.snapshot, stored.events), false));
-    }
     let world_json = fs::read_to_string(world_path)
         .await
         .with_context(|| format!("failed to read world file {}", world_path.display()))?;
-    Ok((Engine::from_world_json(&world_json)?, true))
+    let world: WorldDefinition = serde_json::from_str(&world_json)?;
+    if let Some(stored) = storage.load().await? {
+        return Ok((
+            Engine::from_snapshot_with_world_definition(stored.snapshot, stored.events, world)?,
+            false,
+        ));
+    }
+    Ok((Engine::new(world)?, true))
 }
 
 async fn replay(world_path: PathBuf, commands_path: Option<PathBuf>) -> Result<()> {

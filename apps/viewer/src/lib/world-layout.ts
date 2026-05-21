@@ -6,7 +6,7 @@ export interface Vec3 {
   z: number;
 }
 
-export type LocationKind = "home" | "cafe" | "park" | "street" | "generic";
+export type LocationKind = "home" | "cafe" | "office" | "park" | "street" | "generic";
 
 export interface LocationRenderNode {
   id: string;
@@ -57,6 +57,7 @@ export const GRID_CELL_UNITS = 1.45;
 const PALETTE: Record<LocationKind, { color: string; topColor: string }> = {
   home: { color: "#e26b5b", topColor: "#f4b9a4" },
   cafe: { color: "#3f6f8f", topColor: "#e9d9b7" },
+  office: { color: "#6d7f88", topColor: "#d6dde0" },
   park: { color: "#a8d58a", topColor: "#88c46c" },
   street: { color: "#e8dec8", topColor: "#f4ecdc" },
   generic: { color: "#cab9a0", topColor: "#e3d6bc" }
@@ -73,6 +74,7 @@ const HOME_TINTS: { color: string; topColor: string }[] = [
 export function locationKind(location: LocationDefinition): LocationKind {
   if (location.private_home) return "home";
   if (location.id.includes("cafe")) return "cafe";
+  if (location.id.includes("office")) return "office";
   if (location.id.includes("park")) return "park";
   if (location.id.includes("street") || location.id.includes("road") || location.id.includes("plaza")) {
     return "street";
@@ -98,6 +100,8 @@ export function buildLocationLayout(snapshot: WorldSnapshot): LocationRenderNode
         ? { x: footprint.x, y: 1.2, z: footprint.z }
         : kind === "cafe"
         ? { x: footprint.x, y: 0.95, z: footprint.z }
+        : kind === "office"
+        ? { x: footprint.x, y: 1.05, z: footprint.z }
         : kind === "park"
         ? { x: footprint.x, y: 0.18, z: footprint.z }
         : kind === "street"

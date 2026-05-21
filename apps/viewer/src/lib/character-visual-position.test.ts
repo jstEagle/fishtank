@@ -156,6 +156,7 @@ function snapshotWithCharacters(characters: Character[]): WorldSnapshot {
       locations: [],
       homes: [],
       services: [],
+      activity_sites: [],
       spawn_location_id: "village.main_street",
       starting_coins: 10,
       allowance_coins: 1,

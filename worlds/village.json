@@ -70,7 +70,7 @@
       "grid_position": {"x": 4, "y": 4},
       "grid_size": {"width": 5, "height": 2},
       "facing": "south",
-      "exits": ["village.home_1", "village.home_2", "village.home_3", "village.cafe", "village.park"],
+      "exits": ["village.home_1", "village.home_2", "village.home_3", "village.cafe", "village.park", "village.office"],
       "directional_exits": {
         "north": "village.cafe",
         "south": "village.park",
@@ -80,6 +80,18 @@
         "back": "village.park"
       },
       "poi_ids": [],
+      "private_home": false
+    },
+    {
+      "id": "village.office",
+      "name": "Work Office",
+      "description": "A modest office building with shared desks, a vending machine, and quiet workstations.",
+      "grid_position": {"x": 11, "y": 3},
+      "grid_size": {"width": 2, "height": 2},
+      "facing": "west",
+      "exits": ["village.main_street"],
+      "directional_exits": {"west": "village.main_street", "back": "village.main_street"},
+      "poi_ids": ["village.office.workstation", "village.office.vending_machine"],
       "private_home": false
     },
     {
@@ -97,13 +109,13 @@
     {
       "id": "village.park",
       "name": "Pocket Park",
-      "description": "A quiet patch of grass with two benches and a notice board.",
+      "description": "A quiet patch of grass with benches and a chess table.",
       "grid_position": {"x": 9, "y": 8},
       "grid_size": {"width": 3, "height": 3},
       "facing": "north",
       "exits": ["village.main_street"],
       "directional_exits": {"north": "village.main_street", "back": "village.main_street"},
-      "poi_ids": [],
+      "poi_ids": ["village.park.bench", "village.park.chess_table"],
       "private_home": false
     }
   ],
@@ -130,10 +142,51 @@
       "name": "Cafe Service Window",
       "location_id": "village.cafe",
       "item": "coffee",
+      "description": "A service window that sells coffee for coins.",
       "price_coins": 2,
       "duration_ticks": 10,
       "capacity": 3,
       "overflow_behavior": "queue_nearby"
+    },
+    {
+      "id": "village.office.vending_machine",
+      "name": "Office Vending Machine",
+      "location_id": "village.office",
+      "item": "sparkling_water",
+      "description": "A vending machine that trades one coin for a cold sparkling water.",
+      "price_coins": 1,
+      "duration_ticks": 5,
+      "capacity": 2,
+      "overflow_behavior": "queue_nearby"
+    }
+  ],
+  "activity_sites": [
+    {
+      "id": "village.office.workstation",
+      "name": "Shared Workstation",
+      "location_id": "village.office",
+      "action": "work",
+      "description": "A quiet shared desk where agents can do a short work session and earn coins.",
+      "duration_ticks": 20,
+      "coin_reward": 1
+    },
+    {
+      "id": "village.park.bench",
+      "name": "Park Bench",
+      "location_id": "village.park",
+      "action": "rest",
+      "description": "A bench for taking a short pause in the park.",
+      "duration_ticks": 10,
+      "coin_reward": 0
+    },
+    {
+      "id": "village.park.chess_table",
+      "name": "Chess Table",
+      "location_id": "village.park",
+      "action": "play_chess",
+      "description": "A public chess table for lingering, thinking, and inviting another agent to play.",
+      "duration_ticks": 20,
+      "coin_reward": 0
     }
   ]
 }

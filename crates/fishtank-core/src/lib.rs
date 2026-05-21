@@ -90,6 +90,16 @@ impl Engine {
         }
     }
 
+    pub fn from_snapshot_with_world_definition(
+        mut snapshot: WorldSnapshot,
+        events: Vec<Event>,
+        world: WorldDefinition,
+    ) -> Result<Self, CoreError> {
+        merge_world_definition(&mut snapshot.world, world);
+        validate_world(&snapshot.world)?;
+        Ok(Self::from_snapshot(snapshot, events))
+    }
+
     pub fn replay(world: WorldDefinition, commands: &[CommandEnvelope]) -> Result<Self, CoreError> {
         let mut engine = Self::new(world)?;
         for command in commands {
@@ -296,6 +306,10 @@ impl Engine {
                 let result = self.start_order(&envelope.character_id, &service_id, &item, false)?;
                 Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
             }
+            Command::PerformActivity { site_id } => {
+                let result = self.start_activity_site(&envelope.character_id, &site_id)?;
+                Ok((Some(result), Some(self.observe(&envelope.character_id)?)))
+            }
             Command::Wait { ticks } => {
                 self.advance_ticks(ticks);
                 Ok((
@@ -430,7 +444,20 @@ impl Engine {
             .ok_or_else(|| api_error("not_visible", "The target is not currently visible."))?;
         let description = match entity.entity_type.as_str() {
             "character" => format!("{} is nearby.", entity.name),
-            "service" => format!("{} can be used here.", entity.name),
+            "service" => self
+                .service(&entity.id)
+                .map(|service| {
+                    if service.description.trim().is_empty() {
+                        format!("{} can be used here.", service.name)
+                    } else {
+                        service.description.clone()
+                    }
+                })
+                .unwrap_or_else(|_| format!("{} can be used here.", entity.name)),
+            "activity_site" => self
+                .activity_site(&entity.id)
+                .map(|site| site.description.clone())
+                .unwrap_or_else(|_| entity.name.clone()),
             "location" => self
                 .location(&entity.id)
                 .map(|location| location.description.clone())
@@ -656,6 +683,68 @@ impl Engine {
             completes_at_tick,
             movement_path: Vec::new(),
             promise: Some(promise),
+        })
+    }
+
+    fn start_activity_site(
+        &mut self,
+        character_id: &str,
+        site_id: &str,
+    ) -> Result<CommandResult, ApiError> {
+        self.ensure_can_start_activity(character_id, false)?;
+        let actor = self.require_character(character_id)?.clone();
+        let site = self.activity_site(site_id)?.clone();
+        if site.location_id != actor.location_id {
+            return Err(api_error(
+                "activity_site_not_nearby",
+                "The requested activity site is not available at this location.",
+            )
+            .with_suggestions(["observe", "move"]));
+        }
+        if site.coin_reward > 0 && actor.coins >= self.state.world.max_coins {
+            return Err(api_error(
+                "coin_cap_reached",
+                "The character cannot earn more coins right now.",
+            ));
+        }
+
+        let activity_id = self.next_activity_id(&site.action);
+        let started_at_tick = self.state.tick;
+        let completes_at_tick = started_at_tick + site.duration_ticks;
+        let description = format!("{character_id} starts {} at {}.", site.action, site.name);
+        {
+            let actor = self.require_character_mut(character_id)?;
+            actor.current_activity = Some(Activity {
+                id: activity_id.clone(),
+                kind: ActivityKind::Performing,
+                status: ActivityStatus::Active,
+                target_id: Some(site.id.clone()),
+                movement_path: Vec::new(),
+                started_at_tick,
+                completes_at_tick,
+                description: description.clone(),
+                promise_id: None,
+                reserved_coins: 0,
+                queued: false,
+            });
+            actor.status = CharacterStatus::Performing;
+        }
+        self.record(EventKind::ActivityStarted {
+            character_id: character_id.to_string(),
+            activity_id: activity_id.clone(),
+            description: description.clone(),
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
+        });
+        Ok(CommandResult::ActivityStarted {
+            activity_id,
+            description,
+            estimated_ticks: site.duration_ticks,
+            started_at_tick,
+            completes_at_tick,
+            movement_path: Vec::new(),
+            promise: None,
         })
     }
 
@@ -927,6 +1016,8 @@ impl Engine {
                     self.record(EventKind::CoinsSpent {
                         character_id: character_id.to_string(),
                         amount: service.price_coins,
+                        source_id: Some(service.id.clone()),
+                        item: Some(service.item.clone()),
                     });
                 }
                 if let Some(promise_id) = &activity.promise_id {
@@ -956,6 +1047,48 @@ impl Engine {
                 self.require_character_mut(character_id)
                     .expect("character exists")
                     .status = CharacterStatus::Idle;
+            }
+            ActivityKind::Performing => {
+                let reward = activity
+                    .target_id
+                    .as_ref()
+                    .and_then(|site_id| self.activity_site(site_id).ok())
+                    .map(|site| (site.id.clone(), site.coin_reward))
+                    .unwrap_or_else(|| (activity.target_id.clone().unwrap_or_default(), 0));
+                let earned = {
+                    let actor = self
+                        .state
+                        .characters
+                        .get_mut(character_id)
+                        .expect("character exists");
+                    actor.status = CharacterStatus::Idle;
+                    if reward.1 > 0 {
+                        let before = actor.coins;
+                        actor.coins = actor
+                            .coins
+                            .saturating_add(reward.1)
+                            .min(self.state.world.max_coins);
+                        actor.coins.saturating_sub(before)
+                    } else {
+                        0
+                    }
+                };
+                if earned > 0 {
+                    self.record(EventKind::CoinsEarned {
+                        character_id: character_id.to_string(),
+                        amount: earned,
+                        source_id: reward.0.clone(),
+                    });
+                }
+                self.create_notification(
+                    character_id,
+                    "activity_completed",
+                    "Your activity is complete.",
+                    [
+                        ("activity_id".to_string(), activity.id.clone()),
+                        ("source_id".to_string(), reward.0),
+                    ],
+                );
             }
         }
 
@@ -997,6 +1130,9 @@ impl Engine {
             QueueableCommand::Say { target, text } => self.say(character_id, target, text),
             QueueableCommand::Order { service_id, item } => {
                 self.start_order(character_id, &service_id, &item, true)
+            }
+            QueueableCommand::PerformActivity { site_id } => {
+                self.start_activity_site(character_id, &site_id)
             }
             QueueableCommand::Wait { ticks } => self.start_wait_activity(character_id, ticks),
             QueueableCommand::Home { action } => self.home_action(character_id, action),
@@ -1289,6 +1425,20 @@ impl Engine {
                 targets: service_targets,
             });
         }
+        let activity_targets = self
+            .state
+            .world
+            .activity_sites
+            .iter()
+            .filter(|site| site.location_id == actor.location_id)
+            .map(|site| site.id.clone())
+            .collect::<Vec<_>>();
+        if !activity_targets.is_empty() {
+            actions.push(ActionView {
+                action: "perform_activity".to_string(),
+                targets: activity_targets,
+            });
+        }
         Ok(actions)
     }
 
@@ -1323,6 +1473,20 @@ impl Engine {
                 available_actions: vec!["order".to_string(), "look_at".to_string()],
             });
 
+        let activity_sites = self
+            .state
+            .world
+            .activity_sites
+            .iter()
+            .filter(|site| site.location_id == actor_location_id)
+            .map(|site| EntityView {
+                id: site.id.clone(),
+                entity_type: "activity_site".to_string(),
+                name: site.name.clone(),
+                distance: "near".to_string(),
+                available_actions: vec!["perform_activity".to_string(), "look_at".to_string()],
+            });
+
         let exits = location.exits.iter().map(|exit| EntityView {
             id: exit.clone(),
             entity_type: "location".to_string(),
@@ -1334,7 +1498,11 @@ impl Engine {
             available_actions: vec!["move".to_string(), "look_at".to_string()],
         });
 
-        nearby_characters.chain(services).chain(exits).collect()
+        nearby_characters
+            .chain(services)
+            .chain(activity_sites)
+            .chain(exits)
+            .collect()
     }
 
     fn visible_conversations(&self, actor: &Character) -> Vec<Conversation> {
@@ -1393,6 +1561,7 @@ impl Engine {
         for kind in [
             "directed_speech",
             "promise_resolved",
+            "activity_completed",
             "queue_failed",
             "queue_completed",
             "same_location_entry",
@@ -1795,6 +1964,7 @@ impl Engine {
                 name: format!("{} Service Window", human_block_name(block_index)),
                 location_id: cafe_id.clone(),
                 item: "coffee".to_string(),
+                description: "A service window that sells coffee for coins.".to_string(),
                 price_coins: 2,
                 duration_ticks: 30,
                 capacity: 8,
@@ -2003,6 +2173,23 @@ impl Engine {
             .ok_or_else(|| api_error("unknown_service", "The requested service does not exist."))
     }
 
+    fn activity_site(
+        &self,
+        site_id: &str,
+    ) -> Result<&fishtank_protocol::ActivitySiteDefinition, ApiError> {
+        self.state
+            .world
+            .activity_sites
+            .iter()
+            .find(|site| site.id == site_id)
+            .ok_or_else(|| {
+                api_error(
+                    "unknown_activity_site",
+                    "The requested activity site does not exist.",
+                )
+            })
+    }
+
     fn location(&self, location_id: &str) -> Option<&LocationDefinition> {
         self.state
             .world
@@ -2132,7 +2319,84 @@ fn validate_world(world: &WorldDefinition) -> Result<(), CoreError> {
             ));
         }
     }
+    for site in &world.activity_sites {
+        if site.duration_ticks == 0 {
+            return Err(CoreError::InvalidLocationFootprint(site.id.clone()));
+        }
+        if !world
+            .locations
+            .iter()
+            .any(|location| location.id == site.location_id)
+        {
+            return Err(CoreError::MissingServiceLocation(
+                site.id.clone(),
+                site.location_id.clone(),
+            ));
+        }
+    }
     Ok(())
+}
+
+fn merge_world_definition(target: &mut WorldDefinition, source: WorldDefinition) {
+    target.schema_version = source.schema_version;
+    target.id = source.id;
+    target.name = source.name;
+    target.seed = source.seed;
+    if source.grid.width >= target.grid.width && source.grid.height >= target.grid.height {
+        target.grid = source.grid;
+    }
+    target.starting_coins = source.starting_coins;
+    target.allowance_coins = source.allowance_coins;
+    target.max_coins = source.max_coins;
+    target.spawn_location_id = source.spawn_location_id;
+
+    for location in source.locations {
+        if let Some(existing) = target
+            .locations
+            .iter_mut()
+            .find(|candidate| candidate.id == location.id)
+        {
+            *existing = location;
+        } else {
+            target.locations.push(location);
+        }
+    }
+
+    for home in source.homes {
+        if let Some(existing) = target
+            .homes
+            .iter_mut()
+            .find(|candidate| candidate.id == home.id)
+        {
+            existing.name = home.name;
+        } else {
+            target.homes.push(home);
+        }
+    }
+
+    for service in source.services {
+        if let Some(existing) = target
+            .services
+            .iter_mut()
+            .find(|candidate| candidate.id == service.id)
+        {
+            *existing = service;
+        } else {
+            target.services.push(service);
+        }
+    }
+
+    for site in source.activity_sites {
+        if let Some(existing) = target
+            .activity_sites
+            .iter_mut()
+            .find(|candidate| candidate.id == site.id)
+        {
+            *existing = site;
+        } else {
+            target.activity_sites.push(site);
+        }
+    }
 }
 
 fn validate_hex_color(value: &str, field: &str) -> Result<(), ApiError> {
@@ -2637,6 +2901,188 @@ mod tests {
         ));
         assert!(ack.ok);
         assert!(engine.notifications_for("char_mira", false).is_empty());
+    }
+
+    #[test]
+    fn generic_activity_site_earns_coins_and_notifies() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_mira", "village.office");
+
+        let observation = engine.observe("char_mira").unwrap();
+        assert!(observation.nearby_entities.iter().any(|entity| {
+            entity.entity_type == "activity_site" && entity.id == "village.office.workstation"
+        }));
+        assert!(observation.available_actions.iter().any(|action| {
+            action.action == "perform_activity"
+                && action.targets == vec!["village.office.workstation".to_string()]
+        }));
+
+        let start = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.office.workstation".to_string(),
+            },
+        ));
+        assert!(start.ok, "{start:?}");
+        assert_eq!(
+            engine.state().characters["char_mira"].status,
+            CharacterStatus::Performing
+        );
+        engine.advance_ticks(20);
+        assert_eq!(engine.state().characters["char_mira"].coins, 11);
+        assert!(engine.events().iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::CoinsEarned {
+                    character_id,
+                    amount: 1,
+                    source_id,
+                } if character_id == "char_mira" && source_id == "village.office.workstation"
+            )
+        }));
+        assert!(
+            engine
+                .notifications_for("char_mira", false)
+                .iter()
+                .any(|notification| notification.kind == "activity_completed")
+        );
+    }
+
+    #[test]
+    fn activity_site_validates_location_busy_state_and_coin_cap() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+
+        let distant = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.office.workstation".to_string(),
+            },
+        ));
+        assert_eq!(distant.error.unwrap().code, "activity_site_not_nearby");
+
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_mira", "village.office");
+        let actor = engine.state.characters.get_mut("char_mira").unwrap();
+        actor.coins = engine.state.world.max_coins;
+        let capped = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.office.workstation".to_string(),
+            },
+        ));
+        assert_eq!(capped.error.unwrap().code, "coin_cap_reached");
+
+        engine.state.characters.get_mut("char_mira").unwrap().coins = 10;
+        let started = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.park.bench".to_string(),
+            },
+        ));
+        assert_eq!(started.error.unwrap().code, "activity_site_not_nearby");
+
+        let started = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.office.workstation".to_string(),
+            },
+        ));
+        assert!(started.ok);
+        let busy = engine.apply(env(
+            "char_mira",
+            Command::PerformActivity {
+                site_id: "village.office.workstation".to_string(),
+            },
+        ));
+        assert_eq!(busy.error.unwrap().code, "actor_busy");
+    }
+
+    #[test]
+    fn vending_machine_uses_service_order_path_with_spend_metadata() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        move_to(&mut engine, "char_mira", "village.main_street");
+        move_to(&mut engine, "char_mira", "village.office");
+
+        let order = engine.apply(env(
+            "char_mira",
+            Command::Order {
+                service_id: "village.office.vending_machine".to_string(),
+                item: "sparkling_water".to_string(),
+            },
+        ));
+        assert!(order.ok, "{order:?}");
+        engine.advance_ticks(5);
+        assert_eq!(engine.state().characters["char_mira"].coins, 9);
+        assert!(engine.events().iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::CoinsSpent {
+                    character_id,
+                    amount: 1,
+                    source_id: Some(source_id),
+                    item: Some(item),
+                } if character_id == "char_mira"
+                    && source_id == "village.office.vending_machine"
+                    && item == "sparkling_water"
+            )
+        }));
+    }
+
+    #[test]
+    fn server_state_has_no_plans_or_needs_records() {
+        let engine = engine();
+        let snapshot = serde_json::to_string(engine.state()).unwrap();
+        assert!(!snapshot.contains("\"plans\""));
+        assert!(!snapshot.contains("\"routines\""));
+        assert!(!snapshot.contains("\"needs\""));
+        assert!(!snapshot.contains("\"social_battery\""));
+    }
+
+    #[test]
+    fn stored_snapshots_merge_new_world_definition_config() {
+        let engine = engine();
+        let mut stored = engine.state().clone();
+        stored
+            .world
+            .locations
+            .retain(|location| location.id != "village.office");
+        stored.world.activity_sites.clear();
+        stored
+            .world
+            .services
+            .retain(|service| service.id != "village.office.vending_machine");
+        let refreshed =
+            Engine::from_snapshot_with_world_definition(stored, engine.events().to_vec(), world())
+                .unwrap();
+
+        assert!(
+            refreshed
+                .state()
+                .world
+                .locations
+                .iter()
+                .any(|location| location.id == "village.office")
+        );
+        assert!(
+            refreshed
+                .state()
+                .world
+                .activity_sites
+                .iter()
+                .any(|site| site.id == "village.office.workstation")
+        );
+        assert!(
+            refreshed
+                .state()
+                .world
+                .services
+                .iter()
+                .any(|service| service.id == "village.office.vending_machine")
+        );
     }
 
     #[test]

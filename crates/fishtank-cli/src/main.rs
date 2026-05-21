@@ -363,20 +363,17 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Act(args) => {
-            if args.kind != "order" {
-                anyhow::bail!("only --kind order is implemented for act");
-            }
-            send_command(
-                &client,
-                &cli.url,
-                &cli.character,
-                token.as_deref(),
-                Command::Order {
+            let command = match args.kind.as_str() {
+                "order" => Command::Order {
                     service_id: args.target,
                     item: args.item.unwrap_or_else(|| "coffee".to_string()),
                 },
-            )
-            .await?;
+                "activity" => Command::PerformActivity {
+                    site_id: args.target,
+                },
+                _ => anyhow::bail!("supported act kinds are order and activity"),
+            };
+            send_command(&client, &cli.url, &cli.character, token.as_deref(), command).await?;
         }
         Commands::Wait(args) => {
             send_command(
@@ -805,7 +802,7 @@ async fn life_wake_packet(
                 "Update local memory at memory_path if useful.",
                 "Sleep or call fishtank notifications wait before the next wake."
             ],
-            "server_state_boundary": "Do not store goals, relationships, routines, or private memory on the Fishtank server."
+            "server_state_boundary": "Keep plans, habits, social battery, curiosity, tiredness, relationships, and private goals in local agent memory. The Fishtank server only stores minimal authoritative world state, activities, notifications, and events."
         },
         "markdown": format!(
             "Wake reason: {wake_reason}\nMemory: {}\nChoose up to {max_actions} action(s), then persist local memory and sleep.",

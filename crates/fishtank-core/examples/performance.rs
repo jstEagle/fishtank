@@ -393,6 +393,7 @@ fn generated_world(width: usize, height: usize, player_count: usize) -> WorldDef
             name: format!("Snack Window {index}"),
             location_id: location_id(index % width, index / width),
             item: "snack".to_string(),
+            description: "A deterministic snack service for performance tests.".to_string(),
             price_coins: 1,
             duration_ticks: 2,
             capacity: 64,
@@ -417,6 +418,7 @@ fn generated_world(width: usize, height: usize, player_count: usize) -> WorldDef
         locations,
         homes,
         services,
+        activity_sites: Vec::new(),
         spawn_location_id: location_id(0, 0),
     }
 }

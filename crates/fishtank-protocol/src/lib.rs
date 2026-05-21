@@ -31,6 +31,8 @@ pub struct WorldDefinition {
     pub locations: Vec<LocationDefinition>,
     pub homes: Vec<HomeDefinition>,
     pub services: Vec<ServiceDefinition>,
+    #[serde(default)]
+    pub activity_sites: Vec<ActivitySiteDefinition>,
     pub spawn_location_id: LocationId,
 }
 
@@ -107,6 +109,8 @@ pub struct ServiceDefinition {
     pub name: String,
     pub location_id: LocationId,
     pub item: String,
+    #[serde(default)]
+    pub description: String,
     pub price_coins: u32,
     pub duration_ticks: Tick,
     pub capacity: u32,
@@ -116,6 +120,18 @@ pub struct ServiceDefinition {
 
 fn default_queue_overflow() -> String {
     "queue_nearby".to_string()
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+pub struct ActivitySiteDefinition {
+    pub id: EntityId,
+    pub name: String,
+    pub location_id: LocationId,
+    pub action: String,
+    pub description: String,
+    pub duration_ticks: Tick,
+    #[serde(default)]
+    pub coin_reward: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -141,6 +157,7 @@ pub enum CharacterStatus {
     Idle,
     Moving,
     Ordering,
+    Performing,
     Waiting,
     InsideHome,
     OfflineReturningHome,
@@ -169,6 +186,7 @@ pub struct Activity {
 pub enum ActivityKind {
     Moving,
     Ordering,
+    Performing,
     Waiting,
     ReturningHome,
 }
@@ -255,6 +273,9 @@ pub enum Command {
         service_id: EntityId,
         item: String,
     },
+    PerformActivity {
+        site_id: EntityId,
+    },
     Wait {
         ticks: Tick,
     },
@@ -281,6 +302,7 @@ pub enum QueueableCommand {
     Move { mode: MoveMode },
     Say { target: SpeechTarget, text: String },
     Order { service_id: EntityId, item: String },
+    PerformActivity { site_id: EntityId },
     Wait { ticks: Tick },
     Home { action: HomeAction },
 }
@@ -628,6 +650,15 @@ pub enum EventKind {
     CoinsSpent {
         character_id: CharacterId,
         amount: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<EntityId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
+    CoinsEarned {
+        character_id: CharacterId,
+        amount: u32,
+        source_id: EntityId,
     },
     CoinsReleased {
         character_id: CharacterId,

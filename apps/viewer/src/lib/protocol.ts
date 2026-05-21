@@ -25,6 +25,7 @@ export interface WorldDefinition {
   locations: LocationDefinition[];
   homes: HomeDefinition[];
   services: ServiceDefinition[];
+  activity_sites: ActivitySiteDefinition[];
   spawn_location_id: string;
 }
 
@@ -73,10 +74,21 @@ export interface ServiceDefinition {
   name: string;
   location_id: string;
   item: string;
+  description: string;
   price_coins: number;
   duration_ticks: Tick;
   capacity: number;
   overflow_behavior: string;
+}
+
+export interface ActivitySiteDefinition {
+  id: string;
+  name: string;
+  location_id: string;
+  action: string;
+  description: string;
+  duration_ticks: Tick;
+  coin_reward: number;
 }
 
 export interface Character {
@@ -98,13 +110,14 @@ export type CharacterStatus =
   | "idle"
   | "moving"
   | "ordering"
+  | "performing"
   | "waiting"
   | "inside_home"
   | "offline_returning_home";
 
 export interface Activity {
   id: string;
-  kind: "moving" | "ordering" | "waiting" | "returning_home";
+  kind: "moving" | "ordering" | "performing" | "waiting" | "returning_home";
   status: "active" | "completed" | "failed";
   target_id: string | null;
   movement_path: GridPosition[];
@@ -178,6 +191,7 @@ export type Command =
   | { kind: "move"; mode: MoveMode }
   | { kind: "say"; target: SpeechTarget; text: string }
   | { kind: "order"; service_id: string; item: string }
+  | { kind: "perform_activity"; site_id: string }
   | { kind: "wait"; ticks: Tick }
   | { kind: "home_manual" }
   | { kind: "home"; action: HomeAction }
@@ -270,7 +284,14 @@ export type EventKind =
   | { event: "promise_created"; promise: unknown }
   | { event: "promise_resolved"; promise_id: string; character_id: string; resume_hint: string }
   | { event: "coins_reserved"; character_id: string; amount: number }
-  | { event: "coins_spent"; character_id: string; amount: number }
+  | {
+      event: "coins_spent";
+      character_id: string;
+      amount: number;
+      source_id?: string | null;
+      item?: string | null;
+    }
+  | { event: "coins_earned"; character_id: string; amount: number; source_id: string }
   | { event: "coins_released"; character_id: string; amount: number }
   | { event: "home_locked"; character_id: string; home_id: string }
   | { event: "home_unlocked"; character_id: string; home_id: string }

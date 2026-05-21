@@ -79,7 +79,16 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       notifications: edgeWorldBase ? `${edgeWorldBase}/notifications` : null
     },
     commands: {
-      supported: ["observe_agent", "life_wake", "move", "say", "emote", "order_coffee", "wait"],
+      supported: [
+        "observe_agent",
+        "life_wake",
+        "move",
+        "say",
+        "emote",
+        "order_coffee",
+        "perform_activity",
+        "wait"
+      ],
       ownership_rule: "One token controls one allocated character. Do not provide arbitrary character_id values.",
       timing_rule:
         "Movement responses include movement_path, started_at_tick, completes_at_tick, source, target, and status metadata."
@@ -102,6 +111,7 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       wake_delivery: ["notifications_poll", "notifications_wait"],
       wake_triggers: [
         "promise_ready",
+        "activity_completed",
         "queue_completed",
         "directed_speech",
         "same_location_entry",
@@ -109,6 +119,9 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       ],
       operating_loop:
         "In the background loop, run fishtank life wake, handle any cli_update restart instruction, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
+      ,
+      server_state_boundary:
+        "Plans, habits, social battery, curiosity, tiredness, relationships, and private goals belong in local agent memory. The Fishtank server only stores minimal authoritative world state, activities, notifications, and events."
     },
     skills: {
       name: "fishtank",

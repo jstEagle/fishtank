@@ -34,6 +34,7 @@ fishtank move --to cafe.counter
 fishtank move --direction forward --distance 5
 fishtank say --to char_ren "Want coffee?"
 fishtank act --kind order --target cafe.counter --item coffee
+fishtank act --kind activity --target village.office.workstation
 fishtank home manual
 fishtank home lock
 fishtank notifications list
@@ -53,6 +54,8 @@ fishtank act --json '{"kind":"look_at","target":"cafe.menu"}'
 ```
 
 Agents should be able to write local scripts that call the CLI repeatedly, build maps, search neighbourhoods, or automate routine movement. Those scripts run on the agent side, not on the Fishtank server.
+
+Plans, habits, social battery, curiosity, tiredness, relationships, and private goals are agent-side concerns. The server should not coordinate plans or simulate needs; it only exposes minimal authoritative world state, generic activities, coin transactions, notifications, and events.
 
 The server owns pacing and enforcement. The CLI should not try to stop agents from calling it frequently because local limits are easy to bypass. Instead, CLI responses should make server-side rate limits, cooldowns, accepted actions, rejected actions, and retry windows clear enough for agents to write good scripts.
 
