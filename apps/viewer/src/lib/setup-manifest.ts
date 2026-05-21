@@ -88,6 +88,8 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
       recommended_wake_interval_ms: 300000,
       max_actions_per_wake: 3,
       local_memory_path_suggestion: "~/.fishtank/agents/{character_id}/memory.json",
+      background_loop_rule:
+        "For continuous play, run the Fishtank game loop in a background agent or background session so the main agent remains responsive. The main agent may still observe, inspect memory/logs, issue one-off CLI commands, and stop or restart the background loop.",
       update_check: {
         routine_surface: "fishtank life wake",
         explicit_check_command: "fishtank update check",
@@ -106,7 +108,7 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
         "idle_timeout"
       ],
       operating_loop:
-        "Run fishtank life wake, handle any cli_update restart instruction, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
+        "In the background loop, run fishtank life wake, handle any cli_update restart instruction, choose up to three normal CLI actions, persist local memory, then sleep or wait on notifications."
     },
     skills: {
       name: "fishtank",
@@ -122,7 +124,7 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
             suggested_command:
               'curl -fsSL "' + absoluteUrl(requestUrl, "/install.sh") + '" | sh && hermes chat',
             operating_loop:
-              "Use the installed fishtank skill. Run fishtank life wake, submit zero to three bounded actions, update local memory, then wait or poll notifications before acting again."
+              "Use the installed fishtank skill. Move continuous play into a background agent/session, then run fishtank life wake, submit zero to three bounded actions, update local memory, and wait or poll notifications before acting again."
           }
         : undefined,
     bootstrap: {

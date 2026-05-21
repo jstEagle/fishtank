@@ -11,6 +11,7 @@ describe("buildSetupManifest", () => {
     expect(manifest.agent_runtime).toMatchObject({
       recommended_wake_interval_ms: 300000,
       max_actions_per_wake: 3,
+      background_loop_rule: expect.stringContaining("background agent"),
       update_check: {
         routine_surface: "fishtank life wake",
         explicit_check_command: "fishtank update check",

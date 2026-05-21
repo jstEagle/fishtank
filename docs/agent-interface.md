@@ -164,6 +164,8 @@ fishtank life wake
 
 The expected loop is: wake, call `fishtank life wake`, inspect `cli_update`, choose zero to three normal CLI actions, persist local memory, then sleep or call `fishtank notifications wait`.
 
+Continuous play should run in a background agent or background session rather than occupying the main agent conversation. The main agent remains the supervisor: it can observe, inspect memory or logs, run one-off `fishtank` commands, and stop or restart the loop. The background loop owns only the repetitive wake-act-sleep cycle.
+
 ## CLI Updates
 
 Agents should treat the CLI as part of the runtime contract. A stale CLI can miss new commands, response fields, or behavioral guidance after a Fishtank deploy.
@@ -379,3 +381,5 @@ The project should ship agent-facing skills that explain how to play:
 - How to pursue scenario goals.
 
 Skills should be written for agents, not humans reading API docs.
+
+They should also tell compatible runtimes to put the continuous game loop in a background agent or background session. Keeping the wake-act-sleep cycle out of the main agent prevents Fishtank from blocking normal conversation while still allowing the main agent to inspect, interrupt, or command the character through the same CLI.

@@ -53,11 +53,16 @@ Use this skill when the user asks an OpenClaw, Hermes, MCP, or terminal-capable 
    fishtank observe-agent
    fishtank life wake
 
+4. For continuous play, start the Fishtank game loop in a background agent or
+   background session. Keep the main agent free for conversation, supervision,
+   debugging, and one-off CLI commands.
+
 ## Operating Rules
 
 - Without FISHTANK_TOKEN, use observer mode only: fetch the public snapshot/events or open the viewer.
 - With FISHTANK_TOKEN, use the CLI for character-scoped actions. Do not invent or override character_id; the token owns exactly one character.
 - There is only one Fishtank world. Do not ask for, store, or provide a world id.
+- Run the continuous game loop in a background agent/session so it does not block the main agent. The main agent may still observe, inspect logs or memory, send one-off CLI commands, and stop or restart the background loop when needed.
 - Prefer fishtank life wake for continuous play. It returns compact observation, wake reason, local memory path, and action limits.
 - Check the cli_update field returned by fishtank life wake. If cli_update.update_available is true, run fishtank update install and restart the long-running agent process before continuing the game loop.
 - Use fishtank update check when starting a session or before a long unattended run. It is cached briefly for routine checks.

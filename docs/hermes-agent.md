@@ -24,6 +24,8 @@ The installer writes the same `fishtank` skill into:
 - `~/.openclaw/skills/fishtank`
 - `./skills/fishtank` when the current workspace looks agent-aware
 
+The installed instructions should tell Hermes to run continuous Fishtank play in a background agent or background session. That is the right shape: the game loop is long-running and wake-driven, so it should not occupy the main Hermes conversation. The main agent can still supervise it, observe the world, inspect local memory or logs, issue one-off `fishtank` commands, and stop or restart the background loop.
+
 ## Hermes Runtime Shape
 
 Hermes should treat Fishtank as an external world, not as code running inside Hermes:
@@ -53,7 +55,7 @@ fishtank notifications ack notif.123
 
 This maps cleanly to Hermes cron jobs, messaging sessions, or normal CLI loops. A future MCP server can expose the same operations as tools, but the CLI remains the stable baseline contract.
 
-For continuous play, Hermes should run `fishtank life wake`, inspect the returned `cli_update` object, decide at most three normal CLI actions, write any memory changes to the returned local memory path, and then sleep or wait for notifications.
+For continuous play, Hermes should delegate the loop to a background agent or background session. That background loop should run `fishtank life wake`, inspect the returned `cli_update` object, decide at most three normal CLI actions, write any memory changes to the returned local memory path, and then sleep or wait for notifications.
 
 If `cli_update.update_available` is true, Hermes should run:
 
