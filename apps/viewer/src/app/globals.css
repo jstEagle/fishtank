@@ -2009,6 +2009,126 @@ section.closing {
   font-style: italic;
 }
 
+.occupants-card {
+  position: absolute;
+  min-width: 168px;
+  max-width: 220px;
+  padding: 8px;
+  border-radius: var(--r-lg);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 28px rgba(17, 17, 15, 0.13);
+  transform: translate(-50%, calc(-100% - 10px));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  user-select: none;
+}
+
+.occupants-card::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  transform: translateX(-50%) rotate(45deg);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.occupants-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 3px 6px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.occupants-card-head strong {
+  min-width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.occupants-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.occupant-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 7px 4px 4px;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.occupant-row:hover {
+  background: rgba(17, 17, 15, 0.05);
+}
+
+.occupant-row.selected {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.occupant-row > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-mini {
+  position: relative;
+  width: 18px;
+  height: 20px;
+  border-radius: 6px 6px 5px 5px;
+  border: 1px solid rgba(17, 17, 15, 0.12);
+  box-shadow: inset 0 -3px 0 rgba(17, 17, 15, 0.1);
+}
+
+.bot-mini::before {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+.bot-mini > span {
+  position: absolute;
+  top: 5px;
+  left: 4px;
+  width: 10px;
+  height: 5px;
+  border-radius: 3px;
+  border: 1px solid rgba(17, 17, 15, 0.1);
+}
+
 .tooltip {
   position: absolute;
   padding: 4px 10px;

@@ -3,7 +3,11 @@
 import { useEffect, useRef } from "react";
 import * as pc from "playcanvas";
 import type { Character, GroundType, WorldSnapshot } from "@/lib/protocol";
-import { characterVisualPositions } from "@/lib/character-visual-position";
+import {
+  buildingOccupants,
+  characterVisualPositions,
+  isCharacterRigVisible
+} from "@/lib/character-visual-position";
 import {
   buildLocationLayout,
   buildServiceLayout,
@@ -28,12 +32,21 @@ export interface HoverInfo extends PickedInfo {
   y: number;
 }
 
+export interface BuildingOccupantInfo {
+  locationId: string;
+  locationName: string;
+  x: number;
+  y: number;
+  characters: Character[];
+}
+
 export interface PlayCanvasViewerProps {
   snapshot: WorldSnapshot | null;
   selectedCharacterId: string | null;
   onPick: (info: PickedInfo | null) => void;
   onHover: (info: HoverInfo | null) => void;
   onSelectedScreenPosition: (pos: { x: number; y: number } | null) => void;
+  onBuildingOccupants: (info: BuildingOccupantInfo[]) => void;
 }
 
 interface CharacterRig {
@@ -213,6 +226,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       const current = snapshotRef.current;
       if (!current) {
         propsRef.current.onSelectedScreenPosition(null);
+        propsRef.current.onBuildingOccupants([]);
         return;
       }
 
@@ -226,6 +240,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
         const rig = characterRigs.current.get(character.id);
         if (!rig) continue;
         const position = visualPositions.get(character.id) ?? { x: 0, y: 0, z: 0 };
+        rig.entity.enabled = isCharacterRigVisible(character, byLocation);
         const bob = Math.sin(now / 220 + rig.bobSeed) * 0.08;
         rig.entity.setPosition(position.x, position.y + 0.55 + bob, position.z);
 
@@ -251,7 +266,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
 
       // Emit selected screen position for floating info card.
       const cameraComp = camera.camera;
-      if (cameraComp && selectedRig) {
+      if (cameraComp && selectedRig && selectedRig.entity.enabled) {
         const world = selectedRig.entity.getPosition();
         const screen = new pc.Vec3();
         cameraComp.worldToScreen(new pc.Vec3(world.x, world.y + 0.95, world.z), screen);
@@ -261,6 +276,14 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
         });
       } else {
         propsRef.current.onSelectedScreenPosition(null);
+      }
+
+      if (cameraComp) {
+        propsRef.current.onBuildingOccupants(
+          buildingOccupantScreenPositions(current, nodes, byLocation, cameraComp)
+        );
+      } else {
+        propsRef.current.onBuildingOccupants([]);
       }
     });
 
@@ -388,6 +411,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       };
 
       for (const [id, rig] of characterRigs.current) {
+        if (!rig.entity.enabled) continue;
         const snap = snapshotRef.current;
         const name = snap?.characters[id]?.name ?? id;
         const p = rig.entity.getPosition();
@@ -494,6 +518,7 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
     for (const character of Object.values(snapshot.characters)) {
       const rig = buildCharacter(character);
       const position = visualPositions.get(character.id) ?? { x: 0, y: 0, z: 0 };
+      rig.entity.enabled = isCharacterRigVisible(character, byLocation);
       rig.entity.setPosition(position.x, position.y + 0.55, position.z);
       root.addChild(rig.entity);
       characterRigs.current.set(character.id, rig);
@@ -505,6 +530,38 @@ export function PlayCanvasViewer(props: PlayCanvasViewerProps) {
       <canvas ref={canvasRef} className="stage-canvas" aria-label="Fishtank scene" />
     </div>
   );
+}
+
+function buildingOccupantScreenPositions(
+  snapshot: WorldSnapshot,
+  nodes: LocationRenderNode[],
+  byLocation: Map<string, LocationRenderNode>,
+  camera: pc.CameraComponent
+): BuildingOccupantInfo[] {
+  const occupants = buildingOccupants(snapshot, byLocation);
+  const screenPositions: BuildingOccupantInfo[] = [];
+
+  for (const node of nodes) {
+    const characters = occupants.get(node.id);
+    if (!characters?.length) continue;
+
+    const screen = new pc.Vec3();
+    camera.worldToScreen(
+      new pc.Vec3(node.position.x, locationTopHeight(node) + 1.05, node.position.z),
+      screen
+    );
+    if (screen.z < 0) continue;
+
+    screenPositions.push({
+      locationId: node.id,
+      locationName: node.name,
+      x: clamp(screen.x, 120, window.innerWidth - 120),
+      y: clamp(screen.y, 128, window.innerHeight - 80),
+      characters
+    });
+  }
+
+  return screenPositions;
 }
 
 // ---------------------------------------------------------------------------

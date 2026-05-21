@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Character, WorldSnapshot } from "./protocol";
-import { characterPosition, characterVisualPositions } from "./character-visual-position";
+import {
+  buildingOccupants,
+  characterPosition,
+  characterVisualPositions,
+  isCharacterRigVisible
+} from "./character-visual-position";
 import type { LocationRenderNode } from "./world-layout";
 
 describe("characterVisualPositions", () => {
@@ -54,12 +59,60 @@ describe("characterVisualPositions", () => {
     expect(positions.get("char_sol")).toEqual({ x: 5, y: 0, z: 0 });
     expect(positions.get("char_mira")).toEqual({ x: 0, y: 0, z: 0 });
   });
+
+  it("spreads idle characters sharing a park location", () => {
+    const snapshot = snapshotWithCharacters([
+      character("char_mira", "village.park"),
+      character("char_ren", "village.park"),
+      character("char_sol", "village.park")
+    ]);
+    const positions = characterVisualPositions(snapshot, locationMap(), 1);
+
+    expect(distance(positions.get("char_mira")!, positions.get("char_ren")!)).toBeGreaterThan(0.3);
+    expect(distance(positions.get("char_mira")!, positions.get("char_sol")!)).toBeGreaterThan(0.3);
+    expect(distance(positions.get("char_ren")!, positions.get("char_sol")!)).toBeGreaterThan(0.3);
+  });
+
+  it("hides idle building occupants from full bot rendering and groups them by location", () => {
+    const walking = character("char_sol", "village.cafe", {
+      current_activity: {
+        id: "act_2",
+        kind: "moving",
+        status: "active",
+        target_id: "village.main_street",
+        movement_path: [],
+        started_at_tick: 0,
+        completes_at_tick: 10,
+        description: "Walking back to the street.",
+        promise_id: null,
+        reserved_coins: 0,
+        queued: false
+      },
+      status: "moving"
+    });
+    const snapshot = snapshotWithCharacters([
+      character("char_mira", "village.cafe", { name: "Mira" }),
+      character("char_ren", "village.cafe", { name: "Ren" }),
+      walking,
+      character("char_park", "village.park")
+    ]);
+    const byLocation = locationMap();
+    const occupants = buildingOccupants(snapshot, byLocation);
+
+    expect(isCharacterRigVisible(snapshot.characters.char_mira, byLocation)).toBe(false);
+    expect(isCharacterRigVisible(snapshot.characters.char_ren, byLocation)).toBe(false);
+    expect(isCharacterRigVisible(walking, byLocation)).toBe(true);
+    expect(isCharacterRigVisible(snapshot.characters.char_park, byLocation)).toBe(true);
+    expect(occupants.get("village.cafe")?.map((entry) => entry.name)).toEqual(["Mira", "Ren"]);
+    expect(occupants.has("village.park")).toBe(false);
+  });
 });
 
 function locationMap() {
   return new Map<string, LocationRenderNode>([
     ["village.main_street", location("village.main_street", "street", { x: 0, y: 0, z: 0 })],
-    ["village.cafe", location("village.cafe", "cafe", { x: 5, y: 0, z: 0 })]
+    ["village.cafe", location("village.cafe", "cafe", { x: 5, y: 0, z: 0 })],
+    ["village.park", location("village.park", "park", { x: -5, y: 0, z: 0 })]
   ]);
 }
 

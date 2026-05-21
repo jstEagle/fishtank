@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { DevDrawer } from "@/components/DevControls";
 import {
   PlayCanvasViewer,
+  type BuildingOccupantInfo,
   type HoverInfo,
   type PickedInfo
 } from "@/components/PlayCanvasViewer";
@@ -16,6 +17,7 @@ export default function Home() {
   const [selectedLocationId, setSelectedLocationId] = useState<string | null>(null);
   const [hover, setHover] = useState<HoverInfo | null>(null);
   const [selectedScreenPos, setSelectedScreenPos] = useState<{ x: number; y: number } | null>(null);
+  const [buildingOccupants, setBuildingOccupants] = useState<BuildingOccupantInfo[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const characters = useMemo<Character[]>(() => {
@@ -51,6 +53,12 @@ export default function Home() {
     }
   }, []);
 
+  const handleBuildingOccupants = useCallback((next: BuildingOccupantInfo[]) => {
+    setBuildingOccupants((previous) =>
+      sameBuildingOccupants(previous, next) ? previous : next
+    );
+  }, []);
+
   useEffect(() => {
     if (selectedCharacterId && snapshot && !snapshot.characters[selectedCharacterId]) {
       setSelectedCharacterId(null);
@@ -65,6 +73,7 @@ export default function Home() {
         onPick={handlePick}
         onHover={setHover}
         onSelectedScreenPosition={setSelectedScreenPos}
+        onBuildingOccupants={handleBuildingOccupants}
       />
 
       <div className="stage-overlay">
@@ -162,6 +171,18 @@ export default function Home() {
           />
         ) : null}
 
+        {buildingOccupants.map((entry) => (
+          <BuildingOccupantsCard
+            key={entry.locationId}
+            entry={entry}
+            selectedCharacterId={selectedCharacterId}
+            onSelectCharacter={(id) => {
+              setSelectedCharacterId(id);
+              setSelectedLocationId(null);
+            }}
+          />
+        ))}
+
         {selectedLocation &&
         hover &&
         hover.kind === "location" &&
@@ -175,6 +196,68 @@ export default function Home() {
         ) : null}
       </div>
     </main>
+  );
+}
+
+function sameBuildingOccupants(
+  previous: BuildingOccupantInfo[],
+  next: BuildingOccupantInfo[]
+) {
+  if (previous.length !== next.length) return false;
+
+  return previous.every((entry, index) => {
+    const nextEntry = next[index];
+    if (!nextEntry) return false;
+    if (entry.locationId !== nextEntry.locationId) return false;
+    if (entry.locationName !== nextEntry.locationName) return false;
+    if (Math.round(entry.x) !== Math.round(nextEntry.x)) return false;
+    if (Math.round(entry.y) !== Math.round(nextEntry.y)) return false;
+    if (entry.characters.length !== nextEntry.characters.length) return false;
+
+    return entry.characters.every((character, characterIndex) => {
+      const nextCharacter = nextEntry.characters[characterIndex];
+      return (
+        nextCharacter &&
+        character.id === nextCharacter.id &&
+        character.name === nextCharacter.name &&
+        character.body_color === nextCharacter.body_color &&
+        character.face_color === nextCharacter.face_color
+      );
+    });
+  });
+}
+
+function BuildingOccupantsCard({
+  entry,
+  selectedCharacterId,
+  onSelectCharacter
+}: {
+  entry: BuildingOccupantInfo;
+  selectedCharacterId: string | null;
+  onSelectCharacter: (id: string) => void;
+}) {
+  return (
+    <div className="occupants-card" style={{ left: entry.x, top: entry.y }}>
+      <div className="occupants-card-head">
+        <span>{entry.locationName}</span>
+        <strong>{entry.characters.length}</strong>
+      </div>
+      <div className="occupants-list">
+        {entry.characters.map((character) => (
+          <button
+            key={character.id}
+            type="button"
+            className={`occupant-row ${selectedCharacterId === character.id ? "selected" : ""}`}
+            onClick={() => onSelectCharacter(character.id)}
+          >
+            <span className="bot-mini" style={{ background: character.body_color || "#5aa3d7" }}>
+              <span style={{ background: character.face_color || "#fffdf6" }} />
+            </span>
+            <span>{character.name}</span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

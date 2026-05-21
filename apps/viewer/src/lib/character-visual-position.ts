@@ -37,20 +37,20 @@ export function characterVisualPositions(
   estimatedTick: number
 ): Map<string, Vec3> {
   const basePositions = new Map<string, Vec3>();
-  const streetClusters = new Map<string, Character[]>();
+  const openClusters = new Map<string, Character[]>();
 
   for (const character of Object.values(snapshot.characters)) {
     const base = characterPosition(character, snapshot, byLocation, estimatedTick);
     basePositions.set(character.id, base);
 
     const location = byLocation.get(character.location_id);
-    if (location?.kind !== "street" || isWalking(character)) continue;
-    const cluster = streetClusters.get(location.id) ?? [];
+    if (!location || !isOpenLocation(location) || isWalking(character)) continue;
+    const cluster = openClusters.get(location.id) ?? [];
     cluster.push(character);
-    streetClusters.set(location.id, cluster);
+    openClusters.set(location.id, cluster);
   }
 
-  for (const [locationId, characters] of streetClusters) {
+  for (const [locationId, characters] of openClusters) {
     if (characters.length < 2) continue;
     const location = byLocation.get(locationId);
     if (!location) continue;
@@ -67,6 +67,39 @@ export function characterVisualPositions(
   }
 
   return basePositions;
+}
+
+export function isCharacterRigVisible(
+  character: Character,
+  byLocation: Map<string, LocationRenderNode>
+) {
+  const location = byLocation.get(character.location_id);
+  return isWalking(character) || !location || isOpenLocation(location);
+}
+
+export function buildingOccupants(
+  snapshot: WorldSnapshot,
+  byLocation: Map<string, LocationRenderNode>
+): Map<string, Character[]> {
+  const occupants = new Map<string, Character[]>();
+
+  for (const character of Object.values(snapshot.characters)) {
+    const location = byLocation.get(character.location_id);
+    if (!location || isOpenLocation(location) || isWalking(character)) continue;
+    const group = occupants.get(location.id) ?? [];
+    group.push(character);
+    occupants.set(location.id, group);
+  }
+
+  for (const group of occupants.values()) {
+    group.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }
+
+  return occupants;
+}
+
+function isOpenLocation(location: LocationRenderNode) {
+  return location.kind === "street" || location.kind === "park";
 }
 
 function isWalking(character: Character) {
