@@ -10,7 +10,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /data/fishtank
 COPY --from=builder /app/target/release/fishtank-server /usr/local/bin/fishtank-server
+COPY config ./config
 COPY worlds ./worlds
-ENV FISHTANK_WORLD_ID=village
-ENV RUST_LOG=fishtank_server=info,tower_http=info
-CMD ["fishtank-server", "serve", "--world", "worlds/village.json", "--state", "/data/fishtank"]
+CMD ["sh", "-lc", ". /app/config/fishtank.defaults.env && exec fishtank-server serve --world worlds/village.json --state /data/fishtank"]

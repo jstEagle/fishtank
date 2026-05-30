@@ -125,6 +125,21 @@ impl Engine {
         &self.state.command_log
     }
 
+    pub fn compact_history(&mut self, retained_events: usize, retained_commands: usize) -> bool {
+        let mut compacted = false;
+        if self.events.len() > retained_events {
+            let drop_count = self.events.len() - retained_events;
+            self.events.drain(0..drop_count);
+            compacted = true;
+        }
+        if self.state.command_log.len() > retained_commands {
+            let drop_count = self.state.command_log.len() - retained_commands;
+            self.state.command_log.drain(0..drop_count);
+            compacted = true;
+        }
+        compacted
+    }
+
     pub fn events_after(&self, after_id: Option<EventId>) -> Vec<Event> {
         let min_id = after_id.unwrap_or(0);
         self.events
@@ -4403,6 +4418,34 @@ mod tests {
         engine.advance_ticks(0);
         assert_eq!(engine.state().tick, 0);
         assert_eq!(engine.events_after(Some(0)).len(), 1);
+    }
+
+    #[test]
+    fn history_compaction_keeps_recent_events_and_commands() {
+        let mut engine = engine();
+        create(&mut engine, "char_mira", "Mira");
+        for index in 0..5 {
+            assert!(
+                engine
+                    .apply(env("char_mira", Command::Wait { ticks: index + 1 }))
+                    .ok
+            );
+        }
+
+        let newest_event_id = engine.events().last().unwrap().id;
+        assert!(engine.compact_history(3, 2));
+        assert_eq!(engine.events().len(), 3);
+        assert_eq!(engine.command_log().len(), 2);
+        assert_eq!(engine.events().last().unwrap().id, newest_event_id);
+        assert_eq!(
+            engine
+                .events_after(Some(newest_event_id - 1))
+                .last()
+                .unwrap()
+                .id,
+            newest_event_id
+        );
+        assert!(!engine.compact_history(3, 2));
     }
 
     #[test]

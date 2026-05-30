@@ -7,6 +7,8 @@ export interface Env {
 type EventRecord = { id: number; tick: number; [key: string]: unknown };
 type WorldSnapshot = { tick: number; next_event_id: number; [key: string]: unknown };
 
+const SNAPSHOT_BROADCAST_MIN_MS = 10_000;
+
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "access-control-allow-origin": "*",
@@ -40,6 +42,7 @@ export class WorldRoom {
   private upstreamAbort: AbortController | null = null;
   private lastEventId = 0;
   private snapshotRefresh: Promise<void> | null = null;
+  private lastSnapshotBroadcastAt = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -63,7 +66,6 @@ export class WorldRoom {
     if (message === "ping") {
       this.ensureUpstream();
       ws.send(JSON.stringify({ kind: "pong", at: Date.now(), last_event_id: this.lastEventId }));
-      void this.broadcastSnapshot();
     }
   }
 
@@ -88,6 +90,14 @@ export class WorldRoom {
   }
 
   private async broadcastSnapshot() {
+    const now = Date.now();
+    if (
+      this.ctx.getWebSockets().length === 0 ||
+      now - this.lastSnapshotBroadcastAt < SNAPSHOT_BROADCAST_MIN_MS
+    ) {
+      return;
+    }
+
     if (this.snapshotRefresh) {
       return this.snapshotRefresh;
     }
@@ -95,6 +105,7 @@ export class WorldRoom {
     this.snapshotRefresh = (async () => {
       try {
         const snapshot = await this.fetchSnapshot();
+        this.lastSnapshotBroadcastAt = Date.now();
         this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
         this.broadcast({ kind: "snapshot", snapshot });
       } catch (error) {

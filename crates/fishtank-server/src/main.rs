@@ -36,6 +36,8 @@ use tracing::{error, info};
 
 const SINGLETON_STORAGE_KEY: &str = "singleton";
 const REAL_SECONDS_PER_TICK: u64 = 5;
+const DEFAULT_EVENT_HISTORY_LIMIT: usize = 2_000;
+const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 1_000;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -61,6 +63,18 @@ enum Commands {
         gateway_secret: Option<String>,
         #[arg(long, env = "FISHTANK_ADMIN_TOKEN")]
         admin_token: Option<String>,
+        #[arg(
+            long,
+            env = "FISHTANK_EVENT_HISTORY_LIMIT",
+            default_value_t = DEFAULT_EVENT_HISTORY_LIMIT
+        )]
+        event_history_limit: usize,
+        #[arg(
+            long,
+            env = "FISHTANK_COMMAND_HISTORY_LIMIT",
+            default_value_t = DEFAULT_COMMAND_HISTORY_LIMIT
+        )]
+        command_history_limit: usize,
     },
     Replay {
         #[arg(long, default_value = "worlds/village.json")]
@@ -77,6 +91,13 @@ struct AppState {
     gateway_secret: Option<String>,
     admin_token: Option<String>,
     legacy_world_id: String,
+    history_limits: HistoryLimits,
+}
+
+#[derive(Clone, Copy)]
+struct HistoryLimits {
+    events: usize,
+    commands: usize,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +138,8 @@ async fn main() -> Result<()> {
             database_url,
             gateway_secret,
             admin_token,
+            event_history_limit,
+            command_history_limit,
         } => {
             let bind = resolve_bind(bind, port)?;
             serve(
@@ -126,6 +149,10 @@ async fn main() -> Result<()> {
                 database_url,
                 gateway_secret,
                 admin_token,
+                HistoryLimits {
+                    events: event_history_limit,
+                    commands: command_history_limit,
+                },
             )
             .await
         }
@@ -155,6 +182,7 @@ async fn serve(
     database_url: Option<String>,
     gateway_secret: Option<String>,
     admin_token: Option<String>,
+    history_limits: HistoryLimits,
 ) -> Result<()> {
     let storage: Arc<dyn Storage> = if let Some(database_url) = database_url {
         let legacy_keys = postgres_legacy_storage_keys();
@@ -176,8 +204,9 @@ async fn serve(
         Arc::new(FileStorage::new(state_dir))
     };
 
-    let (engine, seeded) = load_or_seed_engine(&world_path, storage.as_ref()).await?;
-    if seeded {
+    let (mut engine, seeded) = load_or_seed_engine(&world_path, storage.as_ref()).await?;
+    let compacted = engine.compact_history(history_limits.events, history_limits.commands);
+    if seeded || compacted {
         storage
             .save(engine.state(), engine.events(), engine.command_log())
             .await?;
@@ -190,6 +219,7 @@ async fn serve(
         gateway_secret,
         admin_token,
         legacy_world_id,
+        history_limits,
     };
     tokio::spawn(run_simulation_clock(app_state.clone()));
     let app = Router::new()
@@ -257,6 +287,7 @@ async fn run_simulation_clock(state: AppState) {
                 None
             } else {
                 engine.advance_ticks(1);
+                engine.compact_history(state.history_limits.events, state.history_limits.commands);
                 Some((
                     engine.state().clone(),
                     engine.events().to_vec(),
@@ -579,6 +610,7 @@ async fn admin_delete_character(
         let Some(character) = engine.delete_character(&character_id) else {
             return Err(AppError::status(StatusCode::NOT_FOUND, "unknown character"));
         };
+        engine.compact_history(state.history_limits.events, state.history_limits.commands);
         (
             character,
             engine.state().clone(),
@@ -646,6 +678,7 @@ async fn apply_envelope(
     let (response, snapshot, events, commands) = {
         let mut engine = state.engine.lock().expect("engine lock poisoned");
         let response = engine.apply(envelope);
+        engine.compact_history(state.history_limits.events, state.history_limits.commands);
         let snapshot = engine.state().clone();
         let events = engine.events().to_vec();
         let commands = engine.command_log().to_vec();
