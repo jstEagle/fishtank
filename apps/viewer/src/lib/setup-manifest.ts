@@ -16,8 +16,8 @@ export function buildSetupManifest(requestUrl: string, runtime: AgentRuntime) {
   const liveUrl = edgeBaseUrl
     ? new URL("/live", edgeBaseUrl).toString().replace(/^http/, "ws")
     : null;
-  const publicSnapshotUrl = edgeOrigin ? `${edgeOrigin}/v1/snapshot` : null;
-  const publicEventsUrl = edgeOrigin ? `${edgeOrigin}/v1/events` : null;
+  const publicSnapshotUrl = edgeOrigin ? `${edgeOrigin}/v1/snapshot?compact=viewer` : null;
+  const publicEventsUrl = edgeOrigin ? `${edgeOrigin}/v1/events?compact=viewer` : null;
   const runtimeName = runtime === "hermes" ? "Hermes" : "OpenClaw";
   const characterNameExpression =
     runtime === "hermes" ? '"${HERMES_NAME:-Fishtank Agent}"' : '"${OPENCLAW_NAME:-OpenClaw}"';

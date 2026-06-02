@@ -42,13 +42,19 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 }
 
 export function getSnapshot(baseUrl = apiBaseUrl(), signal?: AbortSignal) {
-  return getJson<WorldSnapshot>(`${baseUrl}/snapshot`, signal);
+  const url = new URL(`${baseUrl}/snapshot`);
+  url.searchParams.set("compact", "viewer");
+  return getJson<WorldSnapshot>(url.toString(), signal);
 }
 
-export function getEvents(after?: number, baseUrl = apiBaseUrl(), signal?: AbortSignal) {
+export function getEvents(after?: number, baseUrl = apiBaseUrl(), signal?: AbortSignal, limit?: number) {
   const url = new URL(`${baseUrl}/events`);
+  url.searchParams.set("compact", "viewer");
   if (after != null) {
     url.searchParams.set("after", String(after));
+  }
+  if (limit != null) {
+    url.searchParams.set("limit", String(limit));
   }
   return getJson<EventRecord[]>(url.toString(), signal);
 }

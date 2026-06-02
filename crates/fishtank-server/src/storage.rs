@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fishtank_protocol::{CommandEnvelope, Event, SCHEMA_VERSION, WorldSnapshot};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Json};
 use std::{
     collections::BTreeMap,
+    env,
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -52,7 +53,12 @@ impl Storage for FileStorage {
                 .with_context(|| format!("failed to read {}", snapshot_path.display()))?,
         )?;
         let events = read_ndjson::<Event>(&self.state_dir.join("events.ndjson")).await?;
-        Ok(Some(StoredState { snapshot, events }))
+        let commands =
+            read_ndjson::<CommandEnvelope>(&self.state_dir.join("commands.ndjson")).await?;
+        Ok(Some(StoredState {
+            snapshot: snapshot_with_command_log(snapshot, commands),
+            events,
+        }))
     }
 
     async fn save(
@@ -66,7 +72,7 @@ impl Storage for FileStorage {
             .with_context(|| format!("failed to create {}", self.state_dir.display()))?;
         fs::write(
             self.state_dir.join("snapshot.json"),
-            serde_json::to_string_pretty(snapshot)?,
+            snapshot_storage_json(snapshot)?,
         )
         .await?;
         write_ndjson(&self.state_dir.join("events.ndjson"), events).await?;
@@ -116,7 +122,7 @@ impl PgStorage {
         legacy_keys: Vec<String>,
     ) -> Result<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(database_max_connections())
             .connect(database_url)
             .await?;
         let storage = Self {
@@ -169,6 +175,14 @@ impl PgStorage {
     }
 }
 
+fn database_max_connections() -> u32 {
+    env::var("FISHTANK_DATABASE_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(2)
+}
+
 #[async_trait]
 impl Storage for PgStorage {
     async fn load(&self) -> Result<Option<StoredState>> {
@@ -201,9 +215,9 @@ impl Storage for PgStorage {
 
         let mut best: Option<(String, StoredState, String)> = None;
         for (key, snapshot, events, commands, updated_at) in rows {
-            let _commands: Vec<CommandEnvelope> = serde_json::from_value(commands)?;
+            let commands: Vec<CommandEnvelope> = serde_json::from_value(commands)?;
             let stored = StoredState {
-                snapshot: serde_json::from_value(snapshot)?,
+                snapshot: snapshot_with_command_log(serde_json::from_value(snapshot)?, commands),
                 events: serde_json::from_value(events)?,
             };
             let should_replace = best
@@ -239,6 +253,13 @@ impl Storage for PgStorage {
         events: &[Event],
         commands: &[CommandEnvelope],
     ) -> Result<()> {
+        let stored_snapshot;
+        let snapshot = if snapshot.command_log.is_empty() {
+            snapshot
+        } else {
+            stored_snapshot = snapshot_without_command_log(snapshot);
+            &stored_snapshot
+        };
         sqlx::query(
             r#"
             insert into fishtank_world_state (world_id, snapshot, events, commands, updated_at)
@@ -251,9 +272,9 @@ impl Storage for PgStorage {
             "#,
         )
         .bind(&self.storage_key)
-        .bind(serde_json::to_value(snapshot)?)
-        .bind(serde_json::to_value(events)?)
-        .bind(serde_json::to_value(commands)?)
+        .bind(Json(snapshot))
+        .bind(Json(events))
+        .bind(Json(commands))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -293,6 +314,30 @@ impl Storage for PgStorage {
     }
 }
 
+fn snapshot_without_command_log(snapshot: &WorldSnapshot) -> WorldSnapshot {
+    let mut stored = snapshot.clone();
+    stored.command_log.clear();
+    stored
+}
+
+fn snapshot_storage_json(snapshot: &WorldSnapshot) -> Result<String> {
+    if snapshot.command_log.is_empty() {
+        Ok(serde_json::to_string_pretty(snapshot)?)
+    } else {
+        Ok(serde_json::to_string_pretty(
+            &snapshot_without_command_log(snapshot),
+        )?)
+    }
+}
+
+fn snapshot_with_command_log(
+    mut snapshot: WorldSnapshot,
+    command_log: Vec<CommandEnvelope>,
+) -> WorldSnapshot {
+    snapshot.command_log = command_log;
+    snapshot
+}
+
 async fn read_ndjson<T>(path: &Path) -> Result<Vec<T>>
 where
     T: serde::de::DeserializeOwned,
@@ -327,4 +372,61 @@ where
     }
     fs::write(path, output).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fishtank_core::Engine;
+    use fishtank_protocol::{Command, SCHEMA_VERSION};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use time::OffsetDateTime;
+
+    #[tokio::test]
+    async fn file_storage_deduplicates_snapshot_command_log() {
+        let state_dir = std::env::temp_dir().join(format!(
+            "fishtank-storage-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = FileStorage::new(state_dir.clone());
+        let world: fishtank_protocol::WorldDefinition =
+            serde_json::from_str(include_str!("../../../worlds/village.json")).unwrap();
+        let mut engine = Engine::new(world).unwrap();
+        let response = engine.apply(CommandEnvelope {
+            schema_version: SCHEMA_VERSION.to_string(),
+            command_id: "cmd.storage.test".to_string(),
+            character_id: "char_storage".to_string(),
+            submitted_at: OffsetDateTime::UNIX_EPOCH.to_string(),
+            based_on_tick: None,
+            valid_until_tick: None,
+            local_state_hash: None,
+            preconditions: Vec::new(),
+            command: Command::CreateCharacter {
+                name: "Storage".to_string(),
+                body_color: "#4ea1ff".to_string(),
+                face_color: "#101820".to_string(),
+            },
+        });
+        assert!(response.ok, "{response:?}");
+
+        storage
+            .save(engine.state(), engine.events(), engine.command_log())
+            .await
+            .unwrap();
+
+        let snapshot_json = fs::read_to_string(state_dir.join("snapshot.json"))
+            .await
+            .unwrap();
+        let stored_snapshot: WorldSnapshot = serde_json::from_str(&snapshot_json).unwrap();
+        assert!(stored_snapshot.command_log.is_empty());
+
+        let loaded = storage.load().await.unwrap().unwrap();
+        assert_eq!(loaded.snapshot.command_log, engine.command_log());
+
+        fs::remove_dir_all(state_dir).await.unwrap();
+    }
 }

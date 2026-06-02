@@ -19,6 +19,8 @@ describe("buildSetupManifest", () => {
       },
       event_stream_character_scoped: false
     });
+    expect(manifest.api.public_snapshot).toBe("https://edge.example.com/v1/snapshot?compact=viewer");
+    expect(manifest.api.public_events).toBe("https://edge.example.com/v1/events?compact=viewer");
     expect(manifest.api.character_agent_observe).toBe("https://edge.example.com/v1/observe/agent");
     expect(JSON.stringify(manifest)).not.toContain("/worlds/");
 

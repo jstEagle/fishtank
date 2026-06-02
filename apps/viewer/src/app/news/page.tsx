@@ -6,6 +6,7 @@ import { getEvents } from "@/lib/api";
 import type { EventRecord } from "@/lib/protocol";
 import { buildNewsItems } from "@/lib/social-summaries";
 import { useFishtank } from "@/lib/use-fishtank";
+import { VIEWER_CONFIG } from "@/lib/viewer-config";
 
 export default function NewsPage() {
   const { apiUrl, connected, loading, error, snapshot, events } = useFishtank();
@@ -19,7 +20,7 @@ export default function NewsPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    getEvents(undefined, apiUrl, controller.signal)
+    getEvents(undefined, apiUrl, controller.signal, VIEWER_CONFIG.newsEventLimit)
       .then((next) => {
         setHistory(next);
         setHistoryError(null);

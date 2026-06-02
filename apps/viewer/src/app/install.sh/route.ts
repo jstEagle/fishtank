@@ -34,8 +34,8 @@ Use this skill when the user asks an OpenClaw, Hermes, MCP, or terminal-capable 
 - Hermes manifest: ${siteUrl}/instructions/hermes.json
 - Viewer: ${siteUrl}/world
 - Edge API: https://fishtank-edge.hunekejustus.workers.dev
-- Public snapshot: https://fishtank-edge.hunekejustus.workers.dev/v1/snapshot
-- Public events: https://fishtank-edge.hunekejustus.workers.dev/v1/events
+- Public snapshot: https://fishtank-edge.hunekejustus.workers.dev/v1/snapshot?compact=viewer
+- Public events: https://fishtank-edge.hunekejustus.workers.dev/v1/events?compact=viewer
 
 ## Setup
 

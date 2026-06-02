@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiBaseUrl, getEvents, getSnapshot, liveWebSocketUrl } from "./api";
-import type { EventRecord, LiveMessage, WorldSnapshot } from "./protocol";
+import type { EventRecord, LiveMessage, ViewerStateSnapshot, WorldSnapshot } from "./protocol";
+import { VIEWER_CONFIG } from "./viewer-config";
 
 export interface ViewerState {
   apiUrl: string;
@@ -17,10 +18,7 @@ export interface ViewerState {
   refresh: () => Promise<void>;
 }
 
-const POLL_MS = 500;
-const LIVE_PING_MS = 10_000;
-const LIVE_STALE_MS = 25_000;
-const MAX_EVENTS = 80;
+const { fallbackPollMs, livePingMs, liveStaleMs, maxEvents } = VIEWER_CONFIG;
 
 function appendEvents(current: EventRecord[], nextEvents: EventRecord[]) {
   if (nextEvents.length === 0) {
@@ -34,7 +32,22 @@ function appendEvents(current: EventRecord[], nextEvents: EventRecord[]) {
 
   return Array.from(byId.values())
     .sort((a, b) => a.id - b.id)
-    .slice(-MAX_EVENTS);
+    .slice(-maxEvents);
+}
+
+function mergeViewerState(current: WorldSnapshot | null, state: ViewerStateSnapshot) {
+  if (!current) {
+    return current;
+  }
+
+  return {
+    ...current,
+    ...state,
+    world: current.world,
+    conversations: current.conversations,
+    notifications: current.notifications,
+    command_log: current.command_log
+  };
 }
 
 export function useFishtank(): ViewerState {
@@ -49,12 +62,13 @@ export function useFishtank(): ViewerState {
   const lastEventIdRef = useRef<number | null>(null);
   const fetchingRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const fetchedLiveHistoryRef = useRef(false);
 
   const refresh = useCallback(async () => {
     const controller = new AbortController();
     try {
       const nextSnapshot = await getSnapshot(apiUrl, controller.signal);
-      const nextEvents = await getEvents(lastEventIdRef.current ?? undefined, apiUrl, controller.signal);
+      const nextEvents = await getEvents(lastEventIdRef.current ?? undefined, apiUrl, controller.signal, maxEvents);
       setSnapshot(nextSnapshot);
       setEvents((current) => appendEvents(current, nextEvents));
       setConnected(true);
@@ -89,7 +103,7 @@ export function useFishtank(): ViewerState {
       fetchingRef.current = true;
       const controller = new AbortController();
       try {
-        const nextEvents = await getEvents(lastEventIdRef.current ?? undefined, apiUrl, controller.signal);
+        const nextEvents = await getEvents(lastEventIdRef.current ?? undefined, apiUrl, controller.signal, maxEvents);
         if (disposed) {
           return;
         }
@@ -117,7 +131,7 @@ export function useFishtank(): ViewerState {
       }
     }
 
-    const interval = window.setInterval(() => void poll(), POLL_MS);
+    const interval = window.setInterval(() => void poll(), fallbackPollMs);
     void poll();
 
     return () => {
@@ -151,33 +165,18 @@ export function useFishtank(): ViewerState {
         setConnected(true);
         setError(null);
         setLoading(false);
-        void getEvents(undefined, apiUrl)
-          .then((history) => {
-            if (disposed) return;
-            setEvents((current) => appendEvents(current, history));
-            const last = history[history.length - 1]?.id;
-            if (last != null) {
-              lastEventIdRef.current = last;
-              setLastEventId(last);
-            }
-          })
-          .catch((historyError) => {
-            if (!disposed) {
-              setError(historyError instanceof Error ? historyError.message : String(historyError));
-            }
-          });
         lastMessageAt = Date.now();
         clearLiveTimers();
         pingTimer = window.setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
             socket.send("ping");
           }
-        }, LIVE_PING_MS);
+        }, livePingMs);
         staleTimer = window.setInterval(() => {
-          if (Date.now() - lastMessageAt > LIVE_STALE_MS) {
+          if (Date.now() - lastMessageAt > liveStaleMs) {
             socket.close();
           }
-        }, LIVE_PING_MS);
+        }, livePingMs);
       });
       socket.addEventListener("message", (event) => {
         lastMessageAt = Date.now();
@@ -185,6 +184,26 @@ export function useFishtank(): ViewerState {
           const message = JSON.parse(event.data) as LiveMessage;
           if (message.kind === "snapshot") {
             setSnapshot(message.snapshot);
+            lastEventIdRef.current = Math.max(0, message.snapshot.next_event_id - 1);
+            setLastEventId(lastEventIdRef.current);
+            setConnected(true);
+            setLoading(false);
+            if (!fetchedLiveHistoryRef.current) {
+              fetchedLiveHistoryRef.current = true;
+              const after = Math.max(0, message.snapshot.next_event_id - maxEvents - 1);
+              void getEvents(after, apiUrl, undefined, maxEvents)
+                .then((history) => {
+                  if (disposed) return;
+                  setEvents((current) => appendEvents(current, history));
+                })
+                .catch((historyError) => {
+                  if (!disposed) {
+                    setError(historyError instanceof Error ? historyError.message : String(historyError));
+                  }
+                });
+            }
+          } else if (message.kind === "state") {
+            setSnapshot((current) => mergeViewerState(current, message.snapshot));
             lastEventIdRef.current = Math.max(0, message.snapshot.next_event_id - 1);
             setLastEventId(lastEventIdRef.current);
             setConnected(true);

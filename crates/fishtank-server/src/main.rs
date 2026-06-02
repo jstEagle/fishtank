@@ -14,13 +14,14 @@ use axum::{
 use clap::{Parser, Subcommand};
 use fishtank_core::Engine;
 use fishtank_protocol::{
-    AuthenticatedCharacterRequest, Character, Command, CommandEnvelope, Event, EventId,
+    AuthenticatedCharacterRequest, Character, Command, CommandEnvelope, Event, EventId, EventKind,
     SCHEMA_VERSION, TokenCharacter, WorldDefinition, WorldSnapshot,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     convert::Infallible,
     env,
     net::SocketAddr,
@@ -30,7 +31,7 @@ use std::{
     time::Duration,
 };
 use storage::{FileStorage, PgStorage, Storage};
-use tokio::fs;
+use tokio::{fs, sync::watch};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
 
@@ -38,6 +39,7 @@ const SINGLETON_STORAGE_KEY: &str = "singleton";
 const REAL_SECONDS_PER_TICK: u64 = 5;
 const DEFAULT_EVENT_HISTORY_LIMIT: usize = 2_000;
 const DEFAULT_COMMAND_HISTORY_LIMIT: usize = 1_000;
+const DEFAULT_STREAM_KEEPALIVE_SECONDS: u64 = 60;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -88,6 +90,7 @@ enum Commands {
 struct AppState {
     engine: Arc<Mutex<Engine>>,
     storage: Arc<dyn Storage>,
+    event_signal: watch::Sender<EventId>,
     gateway_secret: Option<String>,
     admin_token: Option<String>,
     legacy_world_id: String,
@@ -103,6 +106,14 @@ struct HistoryLimits {
 #[derive(Deserialize)]
 struct EventsQuery {
     after: Option<u64>,
+    compact: Option<String>,
+    limit: Option<usize>,
+    snapshot: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotQuery {
+    compact: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -124,7 +135,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "fishtank_server=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "fishtank_server=info,tower_http=warn".into()),
         )
         .init();
 
@@ -213,9 +224,11 @@ async fn serve(
     }
 
     let legacy_world_id = engine.state().world_id.clone();
+    let (event_signal, _) = watch::channel(engine.state().next_event_id);
     let app_state = AppState {
         engine: Arc::new(Mutex::new(engine)),
         storage,
+        event_signal,
         gateway_secret,
         admin_token,
         legacy_world_id,
@@ -273,9 +286,16 @@ fn postgres_legacy_storage_keys() -> Vec<String> {
 }
 
 async fn run_simulation_clock(state: AppState) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(REAL_SECONDS_PER_TICK));
+    let mut wake_rx = state.event_signal.subscribe();
     loop {
-        ticker.tick().await;
+        if !has_active_activity(&state) {
+            if wake_rx.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
+
+        tokio::time::sleep(Duration::from_secs(REAL_SECONDS_PER_TICK)).await;
         let payload = {
             let mut engine = state.engine.lock().expect("engine mutex poisoned");
             let has_active_activity = engine
@@ -289,19 +309,31 @@ async fn run_simulation_clock(state: AppState) {
                 engine.advance_ticks(1);
                 engine.compact_history(state.history_limits.events, state.history_limits.commands);
                 Some((
-                    engine.state().clone(),
+                    snapshot_for_storage(engine.state()),
                     engine.events().to_vec(),
                     engine.command_log().to_vec(),
                 ))
             }
         };
 
-        if let Some((snapshot, events, commands)) = payload
-            && let Err(err) = state.storage.save(&snapshot, &events, &commands).await
-        {
-            error!(?err, "failed to persist simulation tick");
+        if let Some((snapshot, events, commands)) = payload {
+            notify_state_changed(&state, snapshot.next_event_id);
+            if let Err(err) = state.storage.save(&snapshot, &events, &commands).await {
+                error!(?err, "failed to persist simulation tick");
+            }
         }
     }
+}
+
+fn has_active_activity(state: &AppState) -> bool {
+    state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .state()
+        .characters
+        .values()
+        .any(|character| character.current_activity.is_some())
 }
 
 async fn load_or_seed_engine(
@@ -350,9 +382,10 @@ async fn health() -> Json<serde_json::Value> {
 async fn snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<WorldSnapshot>, AppError> {
+    Query(query): Query<SnapshotQuery>,
+) -> Result<axum::response::Response, AppError> {
     authorize_gateway(&state, &headers)?;
-    Ok(Json(snapshot_from_state(&state)))
+    snapshot_response_for_query(&state, query.compact.as_deref())
 }
 
 async fn events(
@@ -361,7 +394,12 @@ async fn events(
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<Vec<Event>>, AppError> {
     authorize_gateway(&state, &headers)?;
-    Ok(Json(events_from_state(&state, query.after)))
+    Ok(Json(events_for_query(
+        &state,
+        query.after,
+        query.limit,
+        query.compact.as_deref(),
+    )))
 }
 
 async fn observe(
@@ -395,18 +433,20 @@ async fn v1_snapshot(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(world_id): Path<String>,
-) -> Result<Json<WorldSnapshot>, AppError> {
+    Query(query): Query<SnapshotQuery>,
+) -> Result<axum::response::Response, AppError> {
     authorize_gateway(&state, &headers)?;
     ensure_world(&state, &world_id)?;
-    Ok(Json(snapshot_from_state(&state)))
+    snapshot_response_for_query(&state, query.compact.as_deref())
 }
 
 async fn v1_snapshot_default(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<WorldSnapshot>, AppError> {
+    Query(query): Query<SnapshotQuery>,
+) -> Result<axum::response::Response, AppError> {
     authorize_gateway(&state, &headers)?;
-    Ok(Json(snapshot_from_state(&state)))
+    snapshot_response_for_query(&state, query.compact.as_deref())
 }
 
 async fn v1_events(
@@ -417,7 +457,12 @@ async fn v1_events(
 ) -> Result<Json<Vec<Event>>, AppError> {
     authorize_gateway(&state, &headers)?;
     ensure_world(&state, &world_id)?;
-    Ok(Json(events_from_state(&state, query.after)))
+    Ok(Json(events_for_query(
+        &state,
+        query.after,
+        query.limit,
+        query.compact.as_deref(),
+    )))
 }
 
 async fn v1_events_default(
@@ -426,7 +471,12 @@ async fn v1_events_default(
     Query(query): Query<EventsQuery>,
 ) -> Result<Json<Vec<Event>>, AppError> {
     authorize_gateway(&state, &headers)?;
-    Ok(Json(events_from_state(&state, query.after)))
+    Ok(Json(events_for_query(
+        &state,
+        query.after,
+        query.limit,
+        query.compact.as_deref(),
+    )))
 }
 
 async fn v1_stream(
@@ -437,7 +487,12 @@ async fn v1_stream(
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
     authorize_gateway(&state, &headers)?;
     ensure_world(&state, &world_id)?;
-    stream_events(state, query.after)
+    stream_events(
+        state,
+        query.after,
+        query.compact,
+        query.snapshot.unwrap_or(true),
+    )
 }
 
 async fn v1_stream_default(
@@ -446,30 +501,60 @@ async fn v1_stream_default(
     Query(query): Query<EventsQuery>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
     authorize_gateway(&state, &headers)?;
-    stream_events(state, query.after)
+    stream_events(
+        state,
+        query.after,
+        query.compact,
+        query.snapshot.unwrap_or(true),
+    )
 }
 
 fn stream_events(
     state: AppState,
     after: Option<EventId>,
+    compact: Option<String>,
+    send_snapshot: bool,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
     let mut last_event_id = after.unwrap_or(0);
     let stream_state = state.clone();
+    let compact_viewer = compact.as_deref() == Some("viewer");
+    let mut event_rx = state.event_signal.subscribe();
     let stream = async_stream::stream! {
-        let initial = serde_json::to_string(&snapshot_from_state(&stream_state))
-            .unwrap_or_else(|_| "{}".to_string());
-        yield Ok(SseEvent::default().event("snapshot").data(initial));
+        let compact_mode = compact_viewer.then_some("viewer");
+        if compact_viewer && send_snapshot {
+            last_event_id = last_event_id.max(snapshot_last_event_id(&stream_state));
+        }
+        if send_snapshot {
+            let initial = snapshot_json_for_query(&stream_state, compact_mode)
+                .unwrap_or_else(|_| "{}".to_string());
+            yield Ok(SseEvent::default().event("snapshot").data(initial));
+        }
         loop {
-            let events = events_from_state(&stream_state, Some(last_event_id));
+            let (events, latest_event_id) = if compact_viewer {
+                let compact_events = compact_viewer_events_from_state(&stream_state, Some(last_event_id), None);
+                (compact_events.events, compact_events.latest_event_id)
+            } else {
+                let events = events_from_state(&stream_state, Some(last_event_id), None);
+                let latest_event_id = events.last().map(|event| event.id).unwrap_or(last_event_id);
+                (events, latest_event_id)
+            };
+            last_event_id = latest_event_id;
+            let mut sent_events = false;
             for event in events {
-                last_event_id = event.id;
+                sent_events = true;
                 let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
                 yield Ok(SseEvent::default().event("event").id(event.id.to_string()).data(data));
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            if sent_events {
+                continue;
+            }
+            if event_rx.changed().await.is_err() {
+                break;
+            }
         }
     };
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(stream_keepalive_seconds()))))
 }
 
 async fn v1_character(
@@ -613,12 +698,13 @@ async fn admin_delete_character(
         engine.compact_history(state.history_limits.events, state.history_limits.commands);
         (
             character,
-            engine.state().clone(),
+            snapshot_for_storage(engine.state()),
             engine.events().to_vec(),
             engine.command_log().to_vec(),
         )
     };
     state.storage.save(&snapshot, &events, &commands).await?;
+    notify_state_changed(&state, snapshot.next_event_id);
     let token_bindings_deleted = state
         .storage
         .delete_tokens_for_character(&character.id)
@@ -639,12 +725,167 @@ fn snapshot_from_state(state: &AppState) -> WorldSnapshot {
         .clone()
 }
 
-fn events_from_state(state: &AppState, after: Option<u64>) -> Vec<Event> {
+fn snapshot_response_for_query(
+    state: &AppState,
+    compact: Option<&str>,
+) -> Result<axum::response::Response, AppError> {
+    if matches!(compact, Some("viewer" | "viewer_state")) {
+        let body = snapshot_json_for_query(state, compact)?;
+        Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+    } else {
+        Ok(Json(snapshot_from_state(state)).into_response())
+    }
+}
+
+fn snapshot_json_for_query(state: &AppState, compact: Option<&str>) -> Result<String> {
+    match compact {
+        Some("viewer") => viewer_snapshot_json_from_state(state),
+        Some("viewer_state") => viewer_state_snapshot_json_from_state(state),
+        _ => Ok(serde_json::to_string(&snapshot_from_state(state))?),
+    }
+}
+
+fn snapshot_last_event_id(state: &AppState) -> EventId {
     state
         .engine
         .lock()
         .expect("engine lock poisoned")
-        .events_after(after)
+        .state()
+        .next_event_id
+        .saturating_sub(1)
+}
+
+#[derive(Serialize)]
+struct ViewerSnapshot<'a> {
+    schema_version: &'a str,
+    world_id: &'a str,
+    tick: u64,
+    next_event_id: EventId,
+    next_command_seq: u64,
+    next_conversation_seq: u64,
+    world: &'a WorldDefinition,
+    characters: &'a BTreeMap<String, Character>,
+    home_locks: &'a BTreeMap<String, bool>,
+    conversations: &'a BTreeMap<String, serde_json::Value>,
+    notifications: &'a BTreeMap<String, serde_json::Value>,
+    public_invites: &'a BTreeMap<String, serde_json::Value>,
+    public_notices: &'a BTreeMap<String, serde_json::Value>,
+    external_games: &'a BTreeMap<String, serde_json::Value>,
+    command_log: &'a [CommandEnvelope],
+}
+
+#[derive(Serialize)]
+struct ViewerStateSnapshot<'a> {
+    schema_version: &'a str,
+    world_id: &'a str,
+    tick: u64,
+    next_event_id: EventId,
+    next_command_seq: u64,
+    next_conversation_seq: u64,
+    characters: &'a BTreeMap<String, Character>,
+    home_locks: &'a BTreeMap<String, bool>,
+}
+
+fn viewer_snapshot_json_from_state(state: &AppState) -> Result<String> {
+    let engine = state.engine.lock().expect("engine lock poisoned");
+    let snapshot = engine.state();
+    let empty_map = BTreeMap::<String, serde_json::Value>::new();
+    let empty_command_log: &[CommandEnvelope] = &[];
+    Ok(serde_json::to_string(&ViewerSnapshot {
+        schema_version: &snapshot.schema_version,
+        world_id: &snapshot.world_id,
+        tick: snapshot.tick,
+        next_event_id: snapshot.next_event_id,
+        next_command_seq: snapshot.next_command_seq,
+        next_conversation_seq: snapshot.next_conversation_seq,
+        world: &snapshot.world,
+        characters: &snapshot.characters,
+        home_locks: &snapshot.home_locks,
+        conversations: &empty_map,
+        notifications: &empty_map,
+        public_invites: &empty_map,
+        public_notices: &empty_map,
+        external_games: &empty_map,
+        command_log: empty_command_log,
+    })?)
+}
+
+fn viewer_state_snapshot_json_from_state(state: &AppState) -> Result<String> {
+    let engine = state.engine.lock().expect("engine lock poisoned");
+    let snapshot = engine.state();
+    Ok(serde_json::to_string(&ViewerStateSnapshot {
+        schema_version: &snapshot.schema_version,
+        world_id: &snapshot.world_id,
+        tick: snapshot.tick,
+        next_event_id: snapshot.next_event_id,
+        next_command_seq: snapshot.next_command_seq,
+        next_conversation_seq: snapshot.next_conversation_seq,
+        characters: &snapshot.characters,
+        home_locks: &snapshot.home_locks,
+    })?)
+}
+
+fn events_from_state(state: &AppState, after: Option<u64>, limit: Option<usize>) -> Vec<Event> {
+    let mut events = state
+        .engine
+        .lock()
+        .expect("engine lock poisoned")
+        .events_after(after);
+    if let Some(limit) = limit.filter(|limit| *limit > 0)
+        && events.len() > limit
+    {
+        events.drain(0..events.len() - limit);
+    }
+    events
+}
+
+struct CompactEvents {
+    events: Vec<Event>,
+    latest_event_id: EventId,
+}
+
+fn compact_viewer_events_from_state(
+    state: &AppState,
+    after: Option<u64>,
+    limit: Option<usize>,
+) -> CompactEvents {
+    let min_id = after.unwrap_or(0);
+    let limit = limit.filter(|limit| *limit > 0);
+    let engine = state.engine.lock().expect("engine lock poisoned");
+    let latest_event_id = engine
+        .events()
+        .iter()
+        .rev()
+        .find(|event| event.id > min_id)
+        .map(|event| event.id)
+        .unwrap_or(min_id);
+    let mut events: Vec<Event> = engine
+        .events()
+        .iter()
+        .rev()
+        .filter(|event| event.id > min_id)
+        .filter(|event| !matches!(event.kind, EventKind::WorldTimeAdvanced { .. }))
+        .take(limit.unwrap_or(usize::MAX))
+        .cloned()
+        .collect();
+    events.reverse();
+    CompactEvents {
+        events,
+        latest_event_id,
+    }
+}
+
+fn events_for_query(
+    state: &AppState,
+    after: Option<u64>,
+    limit: Option<usize>,
+    compact: Option<&str>,
+) -> Vec<Event> {
+    if compact != Some("viewer") {
+        return events_from_state(state, after, limit);
+    }
+
+    compact_viewer_events_from_state(state, after, limit).events
 }
 
 fn observe_character(state: &AppState, character_id: &str) -> axum::response::Response {
@@ -679,13 +920,32 @@ async fn apply_envelope(
         let mut engine = state.engine.lock().expect("engine lock poisoned");
         let response = engine.apply(envelope);
         engine.compact_history(state.history_limits.events, state.history_limits.commands);
-        let snapshot = engine.state().clone();
+        let snapshot = snapshot_for_storage(engine.state());
         let events = engine.events().to_vec();
         let commands = engine.command_log().to_vec();
         (response, snapshot, events, commands)
     };
     state.storage.save(&snapshot, &events, &commands).await?;
+    notify_state_changed(state, snapshot.next_event_id);
     Ok(response)
+}
+
+fn notify_state_changed(state: &AppState, next_event_id: EventId) {
+    let _ = state.event_signal.send(next_event_id);
+}
+
+fn stream_keepalive_seconds() -> u64 {
+    env::var("FISHTANK_STREAM_KEEPALIVE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value >= 15)
+        .unwrap_or(DEFAULT_STREAM_KEEPALIVE_SECONDS)
+}
+
+fn snapshot_for_storage(snapshot: &WorldSnapshot) -> WorldSnapshot {
+    let mut stored = snapshot.clone();
+    stored.command_log.clear();
+    stored
 }
 
 fn authorize_gateway(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
@@ -837,5 +1097,129 @@ impl IntoResponse for AppError {
             "error": self.message,
         }));
         (self.status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use fishtank_protocol::{CommandResponse, EventKind};
+
+    struct NoopStorage;
+
+    #[async_trait]
+    impl Storage for NoopStorage {
+        async fn load(&self) -> Result<Option<storage::StoredState>> {
+            Ok(None)
+        }
+
+        async fn save(
+            &self,
+            _snapshot: &WorldSnapshot,
+            _events: &[Event],
+            _commands: &[CommandEnvelope],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn character_for_token(&self, _token_hash: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn bind_token(&self, _token_hash: &str, _character_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_tokens_for_character(&self, _character_id: &str) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    fn test_state(engine: Engine) -> AppState {
+        let legacy_world_id = engine.state().world_id.clone();
+        let (event_signal, _) = watch::channel(engine.state().next_event_id);
+        AppState {
+            engine: Arc::new(Mutex::new(engine)),
+            storage: Arc::new(NoopStorage),
+            event_signal,
+            gateway_secret: None,
+            admin_token: None,
+            legacy_world_id,
+            history_limits: HistoryLimits {
+                events: DEFAULT_EVENT_HISTORY_LIMIT,
+                commands: DEFAULT_COMMAND_HISTORY_LIMIT,
+            },
+        }
+    }
+
+    fn world() -> WorldDefinition {
+        serde_json::from_str(include_str!("../../../worlds/village.json")).unwrap()
+    }
+
+    fn create_character(engine: &mut Engine, id: &str) -> CommandResponse {
+        engine.apply(CommandEnvelope {
+            schema_version: SCHEMA_VERSION.to_string(),
+            command_id: format!("cmd.{id}"),
+            character_id: id.to_string(),
+            submitted_at: time::OffsetDateTime::UNIX_EPOCH.to_string(),
+            based_on_tick: None,
+            valid_until_tick: None,
+            local_state_hash: None,
+            preconditions: Vec::new(),
+            command: Command::CreateCharacter {
+                name: id.to_string(),
+                body_color: "#4ea1ff".to_string(),
+                face_color: "#101820".to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn compact_viewer_events_filter_tick_noise_before_limiting() {
+        let mut engine = Engine::new(world()).unwrap();
+        assert!(create_character(&mut engine, "char_one").ok);
+        engine.advance_ticks(1);
+        assert!(create_character(&mut engine, "char_two").ok);
+
+        let state = test_state(engine);
+        let events = events_for_query(&state, Some(0), Some(1), Some("viewer"));
+
+        assert_eq!(events.len(), 1);
+        assert!(!matches!(
+            events[0].kind,
+            EventKind::WorldTimeAdvanced { .. }
+        ));
+        assert!(matches!(events[0].kind, EventKind::CharacterCreated { .. }));
+    }
+
+    #[test]
+    fn compact_viewer_event_scan_advances_past_filtered_tick_events() {
+        let mut engine = Engine::new(world()).unwrap();
+        assert!(create_character(&mut engine, "char_one").ok);
+        let first_event_id = engine.events().last().unwrap().id;
+        engine.advance_ticks(1);
+        let latest_event_id = engine.events().last().unwrap().id;
+
+        let state = test_state(engine);
+        let compact = compact_viewer_events_from_state(&state, Some(first_event_id), None);
+
+        assert!(compact.events.is_empty());
+        assert_eq!(compact.latest_event_id, latest_event_id);
+    }
+
+    #[test]
+    fn viewer_state_snapshot_excludes_static_world_payload() {
+        let mut engine = Engine::new(world()).unwrap();
+        assert!(create_character(&mut engine, "char_one").ok);
+
+        let state = test_state(engine);
+        let body = snapshot_json_for_query(&state, Some("viewer_state")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert!(value.get("world").is_none());
+        assert!(value.get("characters").is_some());
+        assert!(value.get("home_locks").is_some());
+        assert_eq!(value["world_id"], "village");
     }
 }

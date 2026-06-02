@@ -1,3 +1,5 @@
+import { EDGE_CONFIG } from "./config";
+
 export interface Env {
   WORLD_ROOM: DurableObjectNamespace;
   FISHTANK_CORE_URL: string;
@@ -6,8 +8,7 @@ export interface Env {
 
 type EventRecord = { id: number; tick: number; [key: string]: unknown };
 type WorldSnapshot = { tick: number; next_event_id: number; [key: string]: unknown };
-
-const SNAPSHOT_BROADCAST_MIN_MS = 10_000;
+type ViewerStateSnapshot = Pick<WorldSnapshot, "tick" | "next_event_id"> & Record<string, unknown>;
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -17,7 +18,7 @@ const JSON_HEADERS = {
 };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: JSON_HEADERS });
     }
@@ -29,7 +30,7 @@ export default {
     }
 
     if (url.pathname.startsWith("/v1/")) {
-      return proxyApi(request, env);
+      return proxyApi(request, env, ctx);
     }
 
     return json({ ok: true, service: "fishtank-edge", world_model: "single_shared_world" });
@@ -43,6 +44,8 @@ export class WorldRoom {
   private lastEventId = 0;
   private snapshotRefresh: Promise<void> | null = null;
   private lastSnapshotBroadcastAt = 0;
+  private cachedSnapshot: WorldSnapshot | null = null;
+  private cachedSnapshotAt = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
@@ -57,7 +60,7 @@ export class WorldRoom {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
-    await this.sendSnapshot(server);
+    this.sendCachedSnapshot(server);
     this.ensureUpstream();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -76,24 +79,28 @@ export class WorldRoom {
     }
   }
 
-  private async sendSnapshot(ws: WebSocket) {
-    const snapshot = await this.fetchSnapshot();
+  private sendCachedSnapshot(ws: WebSocket) {
+    const snapshot = this.cachedSnapshot;
+    if (!snapshot || Date.now() - this.cachedSnapshotAt > EDGE_CONFIG.cachedSnapshotMaxAgeMs) {
+      return;
+    }
+    this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
     ws.send(JSON.stringify({ kind: "snapshot", snapshot }));
   }
 
-  private async fetchSnapshot() {
-    const response = await coreFetch(this.env, "/v1/snapshot");
+  private async fetchSnapshot(compact: "viewer" | "viewer_state" = "viewer") {
+    const response = await coreFetch(this.env, snapshotPath(compact));
     if (!response.ok) {
       throw new Error(`snapshot fetch failed: ${response.status}`);
     }
-    return response.json() as Promise<WorldSnapshot>;
+    return response.json() as Promise<WorldSnapshot | ViewerStateSnapshot>;
   }
 
   private async broadcastSnapshot() {
     const now = Date.now();
     if (
       this.ctx.getWebSockets().length === 0 ||
-      now - this.lastSnapshotBroadcastAt < SNAPSHOT_BROADCAST_MIN_MS
+      now - this.lastSnapshotBroadcastAt < EDGE_CONFIG.snapshotBroadcastMinMs
     ) {
       return;
     }
@@ -104,7 +111,18 @@ export class WorldRoom {
 
     this.snapshotRefresh = (async () => {
       try {
-        const snapshot = await this.fetchSnapshot();
+        if (this.cachedSnapshot) {
+          const state = await this.fetchSnapshot("viewer_state");
+          this.cachedSnapshot = mergeCachedSnapshot(this.cachedSnapshot, state);
+          this.cachedSnapshotAt = Date.now();
+          this.lastSnapshotBroadcastAt = Date.now();
+          this.lastEventId = Math.max(this.lastEventId, state.next_event_id - 1);
+          this.broadcast({ kind: "state", snapshot: state });
+          return;
+        }
+        const snapshot = (await this.fetchSnapshot("viewer")) as WorldSnapshot;
+        this.cachedSnapshot = snapshot;
+        this.cachedSnapshotAt = Date.now();
         this.lastSnapshotBroadcastAt = Date.now();
         this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
         this.broadcast({ kind: "snapshot", snapshot });
@@ -131,13 +149,17 @@ export class WorldRoom {
       while (!controller.signal.aborted && this.ctx.getWebSockets().length > 0) {
         const response = await coreFetch(
           this.env,
-          `/v1/stream?after=${this.lastEventId}`,
+          upstreamStreamPath(this.lastEventId, this.hasFreshCachedSnapshot()),
           { signal: controller.signal }
         );
         await parseSse(response, (event, data, id) => {
           if (id) this.lastEventId = Number(id);
           if (event === "snapshot") {
-            this.broadcast({ kind: "snapshot", snapshot: JSON.parse(data) });
+            const snapshot = JSON.parse(data) as WorldSnapshot;
+            this.cachedSnapshot = snapshot;
+            this.cachedSnapshotAt = Date.now();
+            this.lastEventId = Math.max(this.lastEventId, snapshot.next_event_id - 1);
+            this.broadcast({ kind: "snapshot", snapshot });
           } else if (event === "event") {
             const record = JSON.parse(data) as EventRecord;
             this.lastEventId = Math.max(this.lastEventId, record.id);
@@ -161,10 +183,54 @@ export class WorldRoom {
       socket.send(message);
     }
   }
+
+  private hasFreshCachedSnapshot() {
+    return Boolean(
+      this.cachedSnapshot && Date.now() - this.cachedSnapshotAt <= EDGE_CONFIG.cachedSnapshotMaxAgeMs
+    );
+  }
 }
 
-async function proxyApi(request: Request, env: Env): Promise<Response> {
+export function upstreamStreamPath(lastEventId: number, skipInitialSnapshot: boolean) {
+  const params = new URLSearchParams({
+    after: String(lastEventId),
+    compact: "viewer"
+  });
+  if (skipInitialSnapshot) {
+    params.set("snapshot", "false");
+  }
+  return `/v1/stream?${params.toString()}`;
+}
+
+export function snapshotPath(compact: "viewer" | "viewer_state") {
+  const params = new URLSearchParams({ compact });
+  return `/v1/snapshot?${params.toString()}`;
+}
+
+export function mergeCachedSnapshot(snapshot: WorldSnapshot, state: ViewerStateSnapshot): WorldSnapshot {
+  return {
+    ...snapshot,
+    ...state,
+    world: snapshot.world,
+    conversations: snapshot.conversations,
+    notifications: snapshot.notifications,
+    public_invites: snapshot.public_invites,
+    public_notices: snapshot.public_notices,
+    external_games: snapshot.external_games,
+    command_log: snapshot.command_log
+  };
+}
+
+async function proxyApi(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  const cache = publicCompactCache(request, url);
+  if (cache) {
+    const hit = await cache.store.match(cache.key);
+    if (hit) {
+      return hit;
+    }
+  }
+
   const upstream = new URL(url.pathname + url.search, env.FISHTANK_CORE_URL);
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${env.FISHTANK_GATEWAY_SECRET}`);
@@ -173,10 +239,48 @@ async function proxyApi(request: Request, env: Env): Promise<Response> {
     headers,
     body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body
   });
-  return new Response(response.body, {
+  const proxied = new Response(response.body, {
     status: response.status,
-    headers: JSON_HEADERS
+    headers: cache ? cacheHeaders() : JSON_HEADERS
   });
+  if (cache && proxied.ok) {
+    ctx?.waitUntil(cache.store.put(cache.key, proxied.clone()));
+  }
+  return proxied;
+}
+
+function publicCompactCache(request: Request, url: URL) {
+  if (request.method !== "GET" || typeof caches === "undefined") {
+    return null;
+  }
+  if (request.headers.has("authorization") || request.headers.has("x-fishtank-agent-token")) {
+    return null;
+  }
+  if (url.searchParams.get("compact") !== "viewer") {
+    return null;
+  }
+  if (url.pathname === "/v1/snapshot") {
+    const key = new URL(url.origin + url.pathname);
+    key.searchParams.set("compact", "viewer");
+    return { store: caches.default, key: new Request(key.toString(), { method: "GET" }) };
+  }
+  if (url.pathname === "/v1/events" && !url.searchParams.has("after")) {
+    const key = new URL(url.origin + url.pathname);
+    key.searchParams.set("compact", "viewer");
+    const limit = url.searchParams.get("limit");
+    if (limit) {
+      key.searchParams.set("limit", limit);
+    }
+    return { store: caches.default, key: new Request(key.toString(), { method: "GET" }) };
+  }
+  return null;
+}
+
+function cacheHeaders() {
+  return {
+    ...JSON_HEADERS,
+    "cache-control": `public, max-age=${EDGE_CONFIG.publicCompactCacheTtlSeconds}`
+  };
 }
 
 async function coreFetch(env: Env, path: string, init: RequestInit = {}) {

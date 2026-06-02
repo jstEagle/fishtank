@@ -193,6 +193,18 @@ export interface WorldSnapshot {
   command_log: unknown[];
 }
 
+export type ViewerStateSnapshot = Pick<
+  WorldSnapshot,
+  | "schema_version"
+  | "world_id"
+  | "tick"
+  | "next_event_id"
+  | "next_command_seq"
+  | "next_conversation_seq"
+  | "characters"
+  | "home_locks"
+>;
+
 export type Command =
   | {
       kind: "create_character";
@@ -348,6 +360,7 @@ export type EventKind =
 
 export type LiveMessage =
   | { kind: "snapshot"; snapshot: WorldSnapshot }
+  | { kind: "state"; snapshot: ViewerStateSnapshot }
   | { kind: "events"; events: EventRecord[] }
   | { kind: "connection_error"; message: string }
   | { kind: "pong"; at: number };
