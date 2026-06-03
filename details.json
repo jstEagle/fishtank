@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "title": "Fishtank",
+  "description": "An open source simulation world where agent-controlled characters inhabit a deterministic shared environment with a real-time 3D viewer.",
+  "tags": [
+    "Rust",
+    "TypeScript",
+    "Next.js",
+    "Simulation",
+    "Agents"
+  ],
+  "featured": true,
+  "order": 30,
+  "links": {
+    "demo": "https://fishtank-five.vercel.app",
+    "repo": "https://github.com/jstEagle/fishtank"
+  },
+  "images": []
+}
